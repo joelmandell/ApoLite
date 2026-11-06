@@ -11,8 +11,8 @@ such as Zoom, using as little CPU and memory as possible.
 
 Equalizer APO is powerful but heavy: a large configuration surface, a Qt editor,
 and a processing graph that carries features most people never touch. ApoLite
-keeps the configuration language people already know, drops everything else, and
-targets one platform.
+keeps the configuration language people already know, ships a small editor for
+the settings that matter, and targets one platform.
 
 | | Equalizer APO | ApoLite |
 |---|---|---|
@@ -20,7 +20,8 @@ targets one platform.
 | Runtime dependency | Qt, VCL, several helper DLLs | none (static runtime) |
 | DSP | multi-threaded graph | single real-time chain, no locks on the audio thread |
 | Config language | rich | the common subset (see below) |
-| Editor | full GUI | plain text file, hot-reloaded |
+| Editor | full Qt GUI, ~40 MB | one small window, no UI framework |
+| Installed size | tens of MB | about 2 MB (DLL plus editor) |
 
 ## Features
 
@@ -32,8 +33,11 @@ targets one platform.
   `If` / `ElseIf` / `Else` / `EndIf`.
 * A built-in `Compressor` with a soft knee and a safety limiter, which is what
   makes voice boosting usable: quiet speech comes up, loud speech does not clip.
-* Config file hot-reload. Edit `config.txt` and the change is live on the next
-  audio block; no service restart, no reboot.
+* Config file hot-reload. Edit `config.txt`, or press Apply in the editor, and
+  the change is live on the next audio block; no service restart, no reboot.
+* A small editor (`ApoLiteEditor.exe`) with the voice bands, a response curve,
+  and a plain-language summary of what the settings will do. No text editing
+  required, and no UI framework to install.
 
 ## Performance
 
@@ -52,9 +56,13 @@ Design choices that follow from that:
 
 ## Getting the audio you want for Zoom
 
-Use `config/voice-mic.txt` as your starting point. It is written for the
-microphone (capture) side, so it changes what other people hear and leaves your
-playback alone.
+Run **`ApoLiteEditor.exe`**. It opens on the voice preset, shows the response
+curve, and writes the configuration when you press **Apply**. That is the whole
+workflow; the rest of this section explains what the controls do.
+
+The preset is also in `config/voice-mic.txt`. It is written for the microphone
+(capture) side, so it changes what other people hear and leaves your playback
+alone.
 
 ```ini
 Stage: capture
@@ -90,6 +98,7 @@ cmake --build build
 Output:
 
 * `ApoLite.dll` - the audio processing object.
+* `ApoLiteEditor.exe` - the editor. A single self-contained file.
 * `apolite.exe` - a command-line tool for validating configurations offline.
 
 ## Installing
@@ -100,9 +109,10 @@ An APO must be registered from an elevated prompt. From the `build` directory:
 regsvr32 ApoLite.dll
 ```
 
-Then copy `config/voice-mic.txt` to `%ProgramData%\ApoLite\config\config.txt`,
-open the **Sound** control panel, select your microphone, and enable the ApoLite
-effect under **Enhancements**. The change takes effect immediately.
+Then run `ApoLiteEditor.exe` and press **Apply**, which writes
+`%ProgramData%\ApoLite\config\config.txt`. Open the **Sound** control panel,
+select your microphone, and enable the ApoLite effect under **Enhancements**.
+The change takes effect immediately.
 
 To remove it:
 

@@ -1,5 +1,9 @@
 # Configuration
 
+Most people never need this page: the **ApoLite editor** covers the voice bands
+and writes the file for you. Read on to go beyond what the editor exposes, or to
+script a configuration.
+
 ApoLite reads a plain text file, one command per line. Blank lines and lines
 starting with `#` are ignored. The syntax is a compatible subset of
 [Equalizer APO](https://sourceforge.net/projects/equalizerapo/)'s, so existing
@@ -7,6 +11,30 @@ configs load with only the unsupported commands dropped.
 
 The default location is `%ProgramData%\ApoLite\config\config.txt`. The file is
 watched and hot-reloaded; saving it applies the change on the next audio block.
+
+The editor and the file stay in sync in both directions. Anything the editor
+does not understand (see [what the editor covers](#what-the-editor-covers)) is
+left alone: it is shown as kept, and written back unchanged when you press Apply.
+
+## What the editor covers
+
+The editor writes these, and only these. Everything else in this document is for
+hand editing.
+
+| Control | Written as |
+|---|---|
+| Applies to | `Stage: capture` or `Stage: post-mix` |
+| Output trim | `Preamp` |
+| Remove rumble | `Filter: ON HP Fc ...` |
+| Reduce muddiness | `Filter: ON PK Fc 250 Hz ...` |
+| Voice presence | `Filter: ON PK Fc 3000 Hz ...` |
+| Clarity | `Filter: ON PK Fc 6000 Hz ...` |
+| Tame harshness | `Filter: ON PK Fc 9000 Hz ...` |
+| Remove hiss | `Filter: ON LP Fc ...` |
+| Even out loud and quiet | `Compressor` |
+
+If you add anything else by hand, the editor keeps those lines and re-emits them
+on Apply, so mixing the two is safe.
 
 ## Selecting what to process
 

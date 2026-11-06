@@ -9,6 +9,10 @@ add_library(ApoLite SHARED
     apolite.def
 )
 
+# The audio engine looks for the file by name, so drop the "lib" prefix that
+# mingw would otherwise add.
+set_target_properties(ApoLite PROPERTIES PREFIX "" SUFFIX ".dll")
+
 target_include_directories(ApoLite PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ApoLite PRIVATE apolite_core ole32 oleaut32 uuid advapi32)
 

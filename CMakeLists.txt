@@ -11,6 +11,12 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+if(WIN32)
+    # ApoLite targets Windows 11 only, so the newest API surface is available
+    # (per-monitor DPI awareness, for instance) without runtime probing.
+    add_compile_definitions(_WIN32_WINNT=0x0A00 WINVER=0x0A00)
+endif()
+
 if(MSVC)
     # Static CRT for every target. The APO DLL is loaded into the audio engine
     # process and must not need a separately installed Visual C++ runtime, and
@@ -32,6 +38,7 @@ add_library(apolite_core STATIC
     src/core/config.cpp
     src/core/engine.cpp
     src/core/impulse.cpp
+    src/core/settings.cpp
 )
 target_include_directories(apolite_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -44,6 +51,7 @@ endif()
 
 option(APOLITE_BUILD_APO "Build the Windows APO DLL" ON)
 option(APOLITE_BUILD_CLI "Build the apolite command-line tool" ON)
+option(APOLITE_BUILD_GUI "Build the ApoLite editor (Windows only)" ON)
 option(APOLITE_BUILD_TESTS "Build the test suite" ON)
 
 if(APOLITE_BUILD_CLI)
@@ -54,6 +62,10 @@ endif()
 
 if(WIN32 AND APOLITE_BUILD_APO)
     add_subdirectory(src/win)
+endif()
+
+if(WIN32 AND APOLITE_BUILD_GUI)
+    add_subdirectory(src/gui)
 endif()
 
 if(APOLITE_BUILD_TESTS)

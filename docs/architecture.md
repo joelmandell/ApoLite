@@ -5,17 +5,27 @@ engine, the engine depends on the DSP core, and the DSP core depends on nothing
 but the C++ standard library.
 
 ```
-        ApoLite.dll (src/win)
-        APO shell, COM, registration, config watching
-                    |
-                    v
-        Engine (src/core/engine.cpp)
-        deinterleave, run the chain, reinterleave
+        ApoLite.dll (src/win)          ApoLiteEditor.exe (src/gui)
+        APO shell, COM, registration   Win32 window, curve, file I/O
+        config watching                        |
+                    |                          |  writes config.txt
+                    v                          v
+        Engine (src/core/engine.cpp) <---- settings.cpp
+        deinterleave, run the chain,      render / parse the
+        reinterleave                      configuration text
                     |
                     v
         DSP core (src/core/*, include/apolite/*)
         biquads, FFT, FIR, filters, config parser
 ```
+
+The editor and the APO never talk to each other directly. They meet at
+`config.txt`: the editor renders its controls to that text, and the APO watches
+the file and reloads. `settings.cpp` holds the single description of what the
+editor can express, and both directions (render and parse) live there, so a file
+written by hand still opens correctly in the editor. Anything the editor cannot
+express is reported as unsupported and written back untouched, so the two ways of
+editing do not fight.
 
 ## The audio thread contract
 

@@ -12,7 +12,8 @@ in real time.
 
 ## 1. Build
 
-See the [README](../README.md). You end up with `ApoLite.dll`.
+See the [README](../README.md). You end up with `ApoLite.dll` and
+`ApoLiteEditor.exe`.
 
 ## 2. Register the APO
 
@@ -34,15 +35,21 @@ regsvr32 /u ApoLite.dll
 
 ## 3. Install a configuration
 
-Create the config directory and copy a preset:
+The easiest way is to run **`ApoLiteEditor.exe`** and press **Apply**. It writes
+`%ProgramData%\ApoLite\config\config.txt` for you. A second launch just
+raises the window that is already open.
+
+If you would rather not use the editor, copy the preset by hand:
 
 ```bat
 mkdir "%ProgramData%\ApoLite\config"
 copy config\voice-mic.txt "%ProgramData%\ApoLite\config\config.txt"
 ```
 
-ApoLite watches that directory. Saving a new `config.txt` reloads the chain on
-the next audio block, so there is no need to restart anything while you tune.
+Either way ApoLite watches that directory. Saving a new `config.txt` reloads the
+chain on the next audio block, so there is no need to restart anything while you
+tune. The editor and the file are interchangeable: the editor reads whatever is
+in the file, including changes you made by hand.
 
 ## 4. Enable the effect on a device
 
@@ -78,6 +85,7 @@ attached debugger.
 | `regsvr32` reports a load error | Missing dependency, or not elevated | Run elevated; confirm the DLL is x64 |
 | No **Enhancements** tab | Driver does not support system effects | Use a device that does, or a virtual audio cable |
 | Effect enabled but no change | Config file not found | Confirm `%ProgramData%\ApoLite\config\config.txt` exists |
+| Apply fails with a write error | The config folder needs administrator rights | Run the editor as administrator |
 | Clicks on enable/disable | Endpoint format change | Expected once; ApoLite adds no latency of its own |
 
 ## Uninstalling

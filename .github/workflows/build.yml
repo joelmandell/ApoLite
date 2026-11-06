@@ -24,9 +24,9 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  # The APO shell is Windows-only and is built with the MSVC toolchain.
+  # The APO shell and the editor are Windows-only, built with MSVC.
   windows:
-    name: apo (Windows, msvc)
+    name: windows (msvc)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,9 +42,13 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Upload DLL
+      # The editor is a single self-contained executable, so it ships next to
+      # the DLL.
+      - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: ApoLite-dll
-          path: build/**/ApoLite.dll
+          name: ApoLite-windows
+          path: |
+            build/**/ApoLite.dll
+            build/**/ApoLiteEditor.exe
           if-no-files-found: warn

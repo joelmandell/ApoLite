@@ -20,6 +20,7 @@
 #include "apolite/fft.h"
 #include "apolite/fir.h"
 #include "apolite/gain.h"
+#include "apolite/settings.h"
 
 namespace {
 
@@ -411,6 +412,133 @@ void testEngineCompressor() {
     check(quiet.back() > 0.002f * 1.5f, "compressor raises quiet speech via makeup gain");
 }
 
+void testSettingsRoundTrip() {
+    // The defaults must render to text the parser accepts, and survive a round
+    // trip without losing any value the editor can express.
+    const apolite::VoiceSettings defaults = apolite::defaultSettings();
+    const std::string text = apolite::toConfigText(defaults);
+    const apolite::ParseResult parsed = apolite::parseConfigText(text);
+    check(parsed.ok, "rendered configuration is parseable");
+    check(parsed.unsupported.empty(), "rendered configuration needs nothing preserved");
+
+    const apolite::VoiceSettings& back = parsed.settings;
+    check(back.target == apolite::Target::Microphone, "target survives round trip");
+    checkNear(back.preampDb, defaults.preampDb, 1e-9, "preamp survives round trip");
+    checkNear(back.presenceGainDb, defaults.presenceGainDb, 1e-9, "presence survives round trip");
+    checkNear(back.deMudGainDb, defaults.deMudGainDb, 1e-9, "de-mud survives round trip");
+    checkNear(back.airGainDb, defaults.airGainDb, 1e-9, "clarity survives round trip");
+    checkNear(back.deEssGainDb, defaults.deEssGainDb, 1e-9, "de-ess survives round trip");
+    checkNear(back.highPassHz, defaults.highPassHz, 1e-9, "high pass survives round trip");
+    checkNear(back.lowPassHz, defaults.lowPassHz, 1e-9, "low pass survives round trip");
+    checkNear(back.thresholdDb, defaults.thresholdDb, 1e-9, "threshold survives round trip");
+    checkNear(back.makeupDb, defaults.makeupDb, 1e-9, "makeup survives round trip");
+    checkNear(back.limitDb, defaults.limitDb, 1e-9, "limit survives round trip");
+    checkNear(back.ratio, defaults.ratio, 1e-9, "ratio survives round trip");
+    check(back.compressorEnabled && back.highPassEnabled && back.lowPassEnabled,
+          "enabled flags survive round trip");
+
+    // Disabled bands must not appear at all.
+    apolite::VoiceSettings off = defaults;
+    off.presenceEnabled = false;
+    off.compressorEnabled = false;
+    const std::string offText = apolite::toConfigText(off);
+    check(offText.find("3000") == std::string::npos, "disabled band is not written");
+    check(offText.find("Compressor") == std::string::npos, "disabled compressor is not written");
+}
+
+void testSettingsParsePreset() {
+    // The shipped preset must load into the editor exactly.
+    const std::string preset =
+        "Stage: capture\n"
+        "Preamp: -3 dB\n"
+        "Filter: ON HP Fc 90 Hz\n"
+        "Filter: ON PK Fc 50 Hz Gain -6 dB Q 1.0\n"
+        "Filter: ON PK Fc 250 Hz Gain -2.5 dB Q 1.1\n"
+        "Filter: ON PK Fc 3000 Hz Gain 3.0 dB Q 1.0\n"
+        "Filter: ON PK Fc 6000 Hz Gain 2.0 dB Q 1.4\n"
+        "Filter: ON PK Fc 9000 Hz Gain -2.0 dB Q 1.2\n"
+        "Compressor: Threshold -22 Ratio 3 Attack 5 Release 120 Makeup 8 Knee 6 Limit -1\n"
+        "Filter: ON LP Fc 18000 Hz\n";
+
+    const apolite::ParseResult parsed = apolite::parseConfigText(preset);
+    check(parsed.ok, "preset parses");
+    const apolite::VoiceSettings& s = parsed.settings;
+    check(s.target == apolite::Target::Microphone, "preset targets the microphone");
+    checkNear(s.preampDb, -3.0, 1e-9, "preset preamp");
+    checkNear(s.highPassHz, 90.0, 1e-9, "preset high pass");
+    checkNear(s.deMudGainDb, -2.5, 1e-9, "preset de-mud");
+    checkNear(s.presenceGainDb, 3.0, 1e-9, "preset presence");
+    checkNear(s.airGainDb, 2.0, 1e-9, "preset clarity");
+    checkNear(s.deEssGainDb, -2.0, 1e-9, "preset de-ess");
+    checkNear(s.lowPassHz, 18000.0, 1e-9, "preset low pass");
+    checkNear(s.thresholdDb, -22.0, 1e-9, "preset threshold");
+    checkNear(s.makeupDb, 8.0, 1e-9, "preset makeup");
+    checkNear(s.limitDb, -1.0, 1e-9, "preset limit");
+
+    // The 50 Hz hum notch is not one of the named bands, so it must come back as
+    // an extra band rather than being dropped.
+    check(s.extraBands.size() == 1, "preset hum notch becomes an extra band");
+    if (!s.extraBands.empty()) {
+        checkNear(s.extraBands[0].freq, 50.0, 1e-9, "extra band frequency");
+        checkNear(s.extraBands[0].gainDb, -6.0, 1e-9, "extra band gain");
+    }
+}
+
+void testSettingsPreservesUnknownCommands() {
+    // Commands the editor cannot express must be reported, not silently dropped,
+    // so a hand-written file is not gutted on Apply.
+    const std::string text =
+        "Preamp: -3 dB\n"
+        "GraphicEQ: 100 0; 1000 3; 10000 0\n"
+        "Convolution: my-impulse.wav\n"
+        "Delay: 10 ms\n"
+        "Copy: L=0.5*L+0.5*R\n"
+        "Include: extra.txt\n"
+        "Filter: ON LSC 6 dB Fc 200 Hz Gain 4 dB\n";
+
+    const apolite::ParseResult parsed = apolite::parseConfigText(text);
+    check(parsed.ok, "file with unknown commands still parses");
+    check(parsed.unsupported.size() == 6, "every unknown command is reported");
+    checkNear(parsed.settings.preampDb, -3.0, 1e-9, "known command alongside unknown ones");
+
+    // The low shelf is a valid filter but not one the editor models, so it is
+    // reported rather than mistaken for a peaking band.
+    bool sawShelf = false;
+    for (const std::string& line : parsed.unsupported) {
+        if (line.find("LSC") != std::string::npos) sawShelf = true;
+    }
+    check(sawShelf, "shelf filter is reported as unsupported");
+}
+
+void testSettingsCurve() {
+    // The drawn curve must match the filters the engine will actually build.
+    apolite::VoiceSettings s = apolite::defaultSettings();
+    s.extraBands.clear();
+    s.compressorEnabled = false;  // the compressor is level dependent, not drawn
+
+    // A single +6 dB peaking band, everything else off.
+    s.preampDb = 0.0;
+    s.highPassEnabled = false;
+    s.deMudEnabled = false;
+    s.airEnabled = false;
+    s.deEssEnabled = false;
+    s.lowPassEnabled = false;
+    s.presenceEnabled = true;
+    s.presenceGainDb = 6.0;
+
+    checkNear(apolite::eqMagnitudeDb(s, apolite::kPresenceHz, 48000.0), 6.0, 0.01,
+              "curve shows the band gain at its centre");
+    checkNear(apolite::eqMagnitudeDb(s, 20.0, 48000.0), 0.0, 0.5,
+              "curve returns to flat well below the band");
+    checkNear(apolite::eqMagnitudeDb(s, 20000.0, 48000.0), 0.0, 0.5,
+              "curve returns to flat well above the band");
+
+    // Preamp shifts the whole curve.
+    s.preampDb = -6.0;
+    checkNear(apolite::eqMagnitudeDb(s, apolite::kPresenceHz, 48000.0), 0.0, 0.01,
+              "preamp offsets the curve");
+}
+
 void testEngineStage() {
     // A capture-only config must be skipped entirely on a playback stage.
     const std::string cfg =
@@ -457,6 +585,10 @@ int main() {
     testEngineIir();
     testEngineCompressor();
     testEngineStage();
+    testSettingsRoundTrip();
+    testSettingsParsePreset();
+    testSettingsPreservesUnknownCommands();
+    testSettingsCurve();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
