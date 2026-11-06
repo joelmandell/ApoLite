@@ -9,7 +9,6 @@
 #include <shlobj.h>
 
 #include <algorithm>
-#include <cmath>
 #include <string>
 #include <vector>
 
@@ -55,6 +54,10 @@ constexpr int kRowHeight = 27;
 constexpr int kCurveHeight = 200;
 constexpr int kSummaryHeight = 78;
 
+// These conversions, and the configuration text, must use a decimal point, not
+// a comma. The C runtime starts in the "C" locale and this program never calls
+// setlocale, so that holds. Calling setlocale(LC_ALL, "") here would break the
+// configuration file on a comma-decimal system.
 double readDouble(HWND edit, double fallback) {
     wchar_t buffer[64] = {};
     GetWindowTextW(edit, buffer, 64);
@@ -90,13 +93,12 @@ std::string readFile(const std::wstring& path) {
     return text;
 }
 
-// One editable band: an optional checkbox, and a value box with a spinner.
+// One editable band: an optional checkbox and a value box.
 struct Row {
     int id = 0;
     HWND label = nullptr;
     HWND check = nullptr;
     HWND edit = nullptr;
-    HWND spin = nullptr;
 };
 
 class EditorWindow {
@@ -109,8 +111,9 @@ private:
     LRESULT handleMessage(UINT message, WPARAM wparam, LPARAM lparam);
 
     HWND addCheck(int id, const wchar_t* label);
-    void addRow(int id, const wchar_t* label, bool withCheck, double min, double max);
+    void addRow(int id, const wchar_t* label, bool withCheck);
     void buildControls();
+    int contentHeight() const;
     void layout(int width, int height);
 
     void loadFromDisk();
@@ -146,6 +149,11 @@ private:
     std::wstring configPath_;
     bool statusIsError_ = false;
 
+    // Set while the controls are being filled from `settings_`. Writing text
+    // into an edit control raises EN_CHANGE, and acting on that would read the
+    // half-populated controls and overwrite the values being loaded.
+    bool populating_ = false;
+
     // Lines the loaded file contained that this editor cannot express. They are
     // written back on Apply, so a hand-written file is not silently gutted.
     std::vector<std::string> preservedLines_;
@@ -161,7 +169,7 @@ HWND EditorWindow::addCheck(int id, const wchar_t* label) {
     return box;
 }
 
-void EditorWindow::addRow(int id, const wchar_t* label, bool withCheck, double min, double max) {
+void EditorWindow::addRow(int id, const wchar_t* label, bool withCheck) {
     Row row;
     row.id = id;
     if (withCheck) {
@@ -180,29 +188,19 @@ void EditorWindow::addRow(int id, const wchar_t* label, bool withCheck, double m
     SendMessageW(row.edit, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     SendMessageW(row.edit, EM_SETLIMITTEXT, 12, 0);
 
-    row.spin = CreateWindowExW(0, UPDOWN_CLASSW, L"",
-                               WS_CHILD | WS_VISIBLE | UDS_ALIGNRIGHT | UDS_SETBUDDYINT |
-                                   UDS_ARROWKEYS | UDS_NOTHOUSANDS,
-                               0, 0, 10, 10, hwnd_, nullptr, nullptr, nullptr);
-    SendMessageW(row.spin, UDM_SETBUDDY, reinterpret_cast<WPARAM>(row.edit), 0);
-    // Spinners are integral, so the range is scaled by ten for one decimal place.
-    SendMessageW(row.spin, UDM_SETRANGE32, static_cast<WPARAM>(std::lround(min * 10.0)),
-                 static_cast<LPARAM>(std::lround(max * 10.0)));
-    SendMessageW(row.spin, UDM_SETPOS32, 0, 0);
-
     rows_.push_back(row);
 }
 
 void EditorWindow::buildControls() {
     // The bands, in signal-path order.
-    addRow(kIdPreamp, L"Output trim", false, -24.0, 12.0);
-    addRow(kIdHighPass, L"Remove rumble", true, 20.0, 400.0);
-    addRow(kIdDeMud, L"Reduce muddiness", true, -12.0, 6.0);
-    addRow(kIdPresence, L"Voice presence", true, -12.0, 12.0);
-    addRow(kIdAir, L"Clarity", true, -12.0, 12.0);
-    addRow(kIdDeEss, L"Tame harshness", true, -12.0, 6.0);
-    addRow(kIdLowPass, L"Remove hiss", true, 8000.0, 22000.0);
-    addRow(kIdCompressor, L"Even out loud and quiet", true, -60.0, 0.0);
+    addRow(kIdPreamp, L"Output trim (dB)", false);
+    addRow(kIdHighPass, L"Remove rumble below (Hz)", true);
+    addRow(kIdDeMud, L"Reduce muddiness (dB)", true);
+    addRow(kIdPresence, L"Voice presence (dB)", true);
+    addRow(kIdAir, L"Clarity (dB)", true);
+    addRow(kIdDeEss, L"Tame harshness (dB)", true);
+    addRow(kIdLowPass, L"Remove hiss above (Hz)", true);
+    addRow(kIdCompressor, L"Even out below (dB)", true);
 
     targetLabel_ = CreateWindowExW(0, L"STATIC", L"Applies to", WS_CHILD | WS_VISIBLE | SS_LEFT, 0,
                                    0, 10, 10, hwnd_, nullptr, nullptr, nullptr);
@@ -230,12 +228,27 @@ void EditorWindow::buildControls() {
                                    nullptr);
     SendMessageW(resetButton_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
 
-    // Every control has a known position, so the window is sized to fit and then
-    // left fixed.
-    RECT desired{0, 0, scale(700), scale(560)};
+    // Every control has a known position, so the window is sized to fit the
+    // content exactly and then left fixed.
+    const int clientWidth = scale(700);
+    const int clientHeight = contentHeight();
+    RECT desired{0, 0, clientWidth, clientHeight};
     AdjustWindowRectEx(&desired, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX, FALSE, 0);
     SetWindowPos(hwnd_, nullptr, 0, 0, desired.right - desired.left, desired.bottom - desired.top,
                  SWP_NOMOVE | SWP_NOZORDER);
+}
+
+// The height the stacked rows, curve, summary, buttons and status line need.
+// Used to size the window, so it is never taller or shorter than the content.
+int EditorWindow::contentHeight() const {
+    const int m = scale(kMargin);
+    int y = m + static_cast<int>(rows_.size()) * scale(kRowHeight);
+    y += scale(6) + scale(kRowHeight) + scale(10);  // "Applies to"
+    y += scale(kCurveHeight) + scale(8);
+    y += scale(kSummaryHeight) + scale(10);
+    y += scale(28) + scale(10);  // buttons
+    y += scale(40) + m;          // status line, bottom margin
+    return y;
 }
 
 // ------------------------------------------------------------------ layout
@@ -253,7 +266,6 @@ void EditorWindow::layout(int width, int height) {
         HWND label = row.check ? row.check : row.label;
         if (label != nullptr) MoveWindow(label, m, y + scale(3), labelW, scale(20), TRUE);
         MoveWindow(row.edit, m + labelW + scale(8), y, editW, controlH, TRUE);
-        MoveWindow(row.spin, m + labelW + scale(8) + editW, y, scale(18), controlH, TRUE);
         y += rowH;
     }
 
@@ -281,6 +293,7 @@ void EditorWindow::layout(int width, int height) {
 // ----------------------------------------------------------- load and store
 
 void EditorWindow::pushToControls() {
+    populating_ = true;
     const VoiceSettings& s = settings_;
     writeDouble(GetDlgItem(hwnd_, kIdPreamp + kValueOffset), s.preampDb, 1);
 
@@ -305,6 +318,7 @@ void EditorWindow::pushToControls() {
 
     SendDlgItemMessageW(hwnd_, kIdTarget, CB_SETCURSEL, s.target == Target::Microphone ? 0 : 1, 0);
     updateRowEnabling();
+    populating_ = false;
 }
 
 void EditorWindow::collectFromControls() {
@@ -339,7 +353,6 @@ void EditorWindow::updateRowEnabling() {
         const bool on =
             SendDlgItemMessageW(hwnd_, row.id, BM_GETCHECK, 0, 0) == BST_CHECKED;
         EnableWindow(row.edit, on);
-        EnableWindow(row.spin, on);
     }
 }
 
@@ -355,8 +368,13 @@ void EditorWindow::loadFromDisk() {
 
     const apolite::ParseResult parsed = apolite::parseConfigText(text);
     if (!parsed.ok) {
-        setStatus(L"The existing file was not recognised, so the defaults are shown instead. "
-                  L"Apply would replace it.",
+        // Nothing usable in the file. Show the preset so the window is still
+        // useful, and say clearly that Apply would replace the file.
+        settings_ = apolite::defaultSettings();
+        preservedLines_.clear();
+        pushToControls();
+        setStatus(L"The existing file was not recognised, so the voice preset is shown instead. "
+                  L"Apply would replace that file.",
                   true);
         return;
     }
@@ -523,6 +541,7 @@ LRESULT EditorWindow::handleMessage(UINT message, WPARAM wparam, LPARAM lparam) 
             return 1;  // painted in WM_PAINT
 
         case WM_COMMAND: {
+            if (populating_) return 0;  // ignore notifications from our own writes
             const int id = LOWORD(wparam);
             const int code = HIWORD(wparam);
             if (code == BN_CLICKED) {
@@ -653,7 +672,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     INITCOMMONCONTROLSEX controls = {};
     controls.dwSize = sizeof(controls);
-    controls.dwICC = ICC_UPDOWN_CLASS | ICC_STANDARD_CLASSES;
+    controls.dwICC = ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&controls);
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);

@@ -444,6 +444,16 @@ void testSettingsRoundTrip() {
     const std::string offText = apolite::toConfigText(off);
     check(offText.find("3000") == std::string::npos, "disabled band is not written");
     check(offText.find("Compressor") == std::string::npos, "disabled compressor is not written");
+
+    // Numbers are written plainly. `%g` would render 18000 as "1.8e+04", which
+    // is valid but unreadable in a file people open by hand.
+    check(text.find("e+") == std::string::npos && text.find("e-") == std::string::npos,
+          "rendered configuration has no scientific notation");
+    check(text.find("Fc 18000 Hz") != std::string::npos, "18000 Hz renders as 18000 Hz");
+    check(text.find("Gain 3.0 dB") != std::string::npos, "gains keep one decimal place");
+    check(text.find("Attack 5\n") != std::string::npos ||
+              text.find("Attack 5 ") != std::string::npos,
+          "whole numbers render without a decimal point");
 }
 
 void testSettingsParsePreset() {

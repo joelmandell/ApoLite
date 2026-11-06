@@ -21,7 +21,7 @@ the settings that matter, and targets one platform.
 | DSP | multi-threaded graph | single real-time chain, no locks on the audio thread |
 | Config language | rich | the common subset (see below) |
 | Editor | full Qt GUI, ~40 MB | one small window, no UI framework |
-| Installed size | tens of MB | about 2 MB (DLL plus editor) |
+| Installed size | tens of MB | about 1 MB (DLL plus editor) |
 
 ## Features
 

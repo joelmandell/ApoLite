@@ -95,10 +95,21 @@ std::string formatDb(double value) {
     return buffer;
 }
 
+// `%g` switches to scientific notation for values such as 18000, which is valid
+// but unreadable in a file people open by hand. Render plainly instead, then
+// trim the trailing zeros that `%f` adds.
 std::string formatValue(double value, const char* unit) {
     char buffer[48] = {};
-    std::snprintf(buffer, sizeof(buffer), *unit ? "%.4g %s" : "%.4g", value, unit);
-    return buffer;
+    std::snprintf(buffer, sizeof(buffer), "%.4f", value);
+
+    std::string number(buffer);
+    if (number.find('.') != std::string::npos) {
+        number.erase(number.find_last_not_of('0') + 1);
+        if (!number.empty() && number.back() == '.') number.pop_back();
+    }
+    if (number.empty() || number == "-0") number = "0";
+
+    return *unit ? number + " " + unit : number;
 }
 
 }  // namespace
