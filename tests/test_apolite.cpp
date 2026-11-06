@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #include "apolite/biquad.h"
 #include "apolite/mathutil.h"
 #include "apolite/channel.h"
@@ -206,8 +210,23 @@ void testGainInterpolator() {
 
 // ------------------------------------------------------------- Engine tests
 
+// A writable scratch directory that exists on both Windows and POSIX, so the
+// same suite runs unchanged under MSVC and under a cross-compiled mingw binary.
+std::string tempDir() {
+#if defined(_WIN32)
+    char buffer[MAX_PATH] = {0};
+    const DWORD len = GetTempPathA(MAX_PATH, buffer);
+    std::string dir = (len > 0 && len < MAX_PATH) ? std::string(buffer, len) : std::string(".\\");
+    while (!dir.empty() && (dir.back() == '\\' || dir.back() == '/')) dir.pop_back();
+    return dir;
+#else
+    const char* tmp = std::getenv("TMPDIR");
+    return (tmp != nullptr && *tmp != '\0') ? std::string(tmp) : std::string("/tmp");
+#endif
+}
+
 std::string writeTemp(const std::string& name, const std::string& text) {
-    const std::string path = "/tmp/apolite_test_" + name;
+    const std::string path = tempDir() + "/apolite_test_" + name;
     FILE* f = std::fopen(path.c_str(), "wb");
     if (f) {
         std::fwrite(text.data(), 1, text.size(), f);
