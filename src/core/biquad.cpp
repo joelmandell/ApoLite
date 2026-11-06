@@ -4,10 +4,11 @@
 
 #include <cmath>
 
+#include "apolite/mathutil.h"
+
 namespace apolite {
 
 namespace {
-constexpr double kPi = 3.14159265358979323846;
 constexpr double kLn2 = 0.69314718055994530942;
 
 double clampFreq(double freq, double sampleRate) {
@@ -64,7 +65,7 @@ Biquad Biquad::design(FilterType type, double gainDb, double freq, double sample
         freq = (type == FilterType::LowShelf) ? freq * factor : freq / factor;
     }
 
-    const double w0 = 2.0 * kPi * clampFreq(freq, sampleRate) / sampleRate;
+    const double w0 = kTwoPi * clampFreq(freq, sampleRate) / sampleRate;
     const double sn = std::sin(w0);
     const double cs = std::cos(w0);
 
@@ -162,7 +163,7 @@ Biquad Biquad::design(FilterType type, double gainDb, double freq, double sample
 }
 
 double Biquad::gainAt(double freq, double sampleRate) const {
-    const double w = 2.0 * kPi * freq / sampleRate;
+    const double w = kTwoPi * freq / sampleRate;
     const double sn = std::sin(w / 2.0);
     const double phi = sn * sn;
 
