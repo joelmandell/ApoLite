@@ -11,6 +11,15 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
+if(MSVC)
+    # Static CRT for every target. The APO DLL is loaded into the audio engine
+    # process and must not need a separately installed Visual C++ runtime, and
+    # mixing /MT with /MD fails at link time.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+    # ApoLite uses the portable C stdio/string functions deliberately.
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
 # The portable DSP core builds on any platform; only the APO shell is Windows.
 add_library(apolite_core STATIC
     src/core/fft.cpp

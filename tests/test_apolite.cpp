@@ -291,7 +291,9 @@ void testEngineGraphicEq() {
 
     const size_t n = 8192;
     std::vector<float> buf(n, 0.0f);
-    for (size_t i = 0; i < n; ++i) buf[i] = std::sin(2.0 * apolite::kPi * 1000.0 * i / 48000.0);
+    for (size_t i = 0; i < n; ++i) {
+        buf[i] = static_cast<float>(std::sin(2.0 * apolite::kPi * 1000.0 * i / 48000.0));
+    }
 
     std::vector<float> reference = buf;
     engine.processInterleaved(buf.data(), n);
