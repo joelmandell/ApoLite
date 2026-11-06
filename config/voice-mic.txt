@@ -1,0 +1,32 @@
+# ApoLite - voice preset for microphone capture (the audio you send to Zoom).
+# Install location: %ProgramData%\ApoLite\config\config.txt
+#
+# Tuned for speech intelligibility and consistent loudness. It is deliberately
+# short so the audio thread does the least work possible.
+
+# Only touch the capture (microphone) stage, so playback is left untouched.
+Stage: capture
+
+# Headroom so the boosts below cannot clip before the compressor acts.
+Preamp: -3 dB
+
+# Remove rumble, desk thumps and mains hum.
+Filter: ON HP Fc 90 Hz
+Filter: ON PK Fc 50 Hz Gain -6 dB Q 1.0
+
+# Cut the boxy low-mid region that makes voices sound muddy.
+Filter: ON PK Fc 250 Hz Gain -2.5 dB Q 1.1
+
+# Presence lift: this is what makes a voice cut through a Zoom call.
+Filter: ON PK Fc 3000 Hz Gain 3.0 dB Q 1.0
+Filter: ON PK Fc 6000 Hz Gain 2.0 dB Q 1.4
+
+# Tame harsh sibilance above the presence band.
+Filter: ON PK Fc 9000 Hz Gain -2.0 dB Q 1.2
+
+# Even out loud and quiet speech, then hold a hard ceiling. This is the part
+# that actually "boosts" you: quiet talkers are raised, shouts are held back.
+Compressor: Threshold -22 Ratio 3 Attack 5 Release 120 Makeup 8 Knee 6 Limit -1
+
+# Final safety net against the 32-bit float to integer conversion clipping.
+Filter: ON LP Fc 18000 Hz

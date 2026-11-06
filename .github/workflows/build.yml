@@ -1,0 +1,48 @@
+name: build
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # The DSP core and the test suite are platform independent, so they run on a
+  # Linux runner for fast feedback.
+  core:
+    name: core (Linux, gcc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DAPOLITE_BUILD_APO=OFF -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  # The APO shell is Windows-only and is built with the MSVC toolchain.
+  windows:
+    name: apo (Windows, msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: ApoLite-dll
+          path: build/src/win/Release/ApoLite.dll
+          if-no-files-found: warn

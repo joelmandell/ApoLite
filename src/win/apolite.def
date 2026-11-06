@@ -1,0 +1,6 @@
+; ApoLite - APO DLL exports. Only the four COM entry points are public.
+EXPORTS
+    DllCanUnloadNow       PRIVATE
+    DllGetClassObject     PRIVATE
+    DllRegisterServer     PRIVATE
+    DllUnregisterServer   PRIVATE

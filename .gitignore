@@ -1,0 +1,32 @@
+# Build output
+build/
+out/
+cmake-build-*/
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+!src/**/*.def
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+CMakeUserPresets.json
+
+# Test / scratch
+*.wav
+!tests/data/*.wav
+Testing/
+CTestTestfile.cmake
+.agent_tmp/
+
+# OS
+Thumbs.db
+.DS_Store
