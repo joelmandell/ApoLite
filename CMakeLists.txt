@@ -26,6 +26,54 @@ if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
+# The version lives in include/apolite/apolite.h. Parse it here so the CMake
+# project version and the Windows VERSIONINFO resource are derived from that one
+# copy instead of being kept in sync by hand. This runs on every platform, so a
+# mismatch fails fast even on a Linux build that never touches the resources.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/include/apolite/apolite.h" _apolite_version
+     REGEX "^#define APOLITE_VERSION_")
+foreach(_line IN LISTS _apolite_version)
+    if(_line MATCHES "APOLITE_VERSION_MAJOR[ \t]+([0-9]+)")
+        set(APOLITE_VERSION_MAJOR "${CMAKE_MATCH_1}")
+    elseif(_line MATCHES "APOLITE_VERSION_MINOR[ \t]+([0-9]+)")
+        set(APOLITE_VERSION_MINOR "${CMAKE_MATCH_1}")
+    elseif(_line MATCHES "APOLITE_VERSION_PATCH[ \t]+([0-9]+)")
+        set(APOLITE_VERSION_PATCH "${CMAKE_MATCH_1}")
+    elseif(_line MATCHES "APOLITE_VERSION_STRING[ \t]+\"([^\"]+)\"")
+        set(APOLITE_VERSION_STRING "${CMAKE_MATCH_1}")
+    endif()
+endforeach()
+
+# Check for an empty value rather than falsiness: a version component of 0 is
+# valid (1.0.0), and `NOT 0` would wrongly reject it.
+if("${APOLITE_VERSION_MAJOR}" STREQUAL "" OR "${APOLITE_VERSION_MINOR}" STREQUAL ""
+   OR "${APOLITE_VERSION_PATCH}" STREQUAL "" OR "${APOLITE_VERSION_STRING}" STREQUAL "")
+    message(FATAL_ERROR
+        "Could not parse APOLITE_VERSION_* from include/apolite/apolite.h.")
+endif()
+
+if(NOT "${PROJECT_VERSION}" STREQUAL "${APOLITE_VERSION_STRING}")
+    message(FATAL_ERROR
+        "project() version ${PROJECT_VERSION} does not match APOLITE_VERSION_STRING "
+        "${APOLITE_VERSION_STRING} in include/apolite/apolite.h. Bump both together.")
+endif()
+
+if(WIN32)
+    enable_language(RC)
+
+    # Adds a VERSIONINFO resource so the patch digit is visible in the Windows
+    # file properties dialog; APO_REG_PROPERTIES has no field for it.
+    function(apolite_add_version_resource target filetype description internal_name original_name)
+        set(APOLITE_FILETYPE "${filetype}")
+        set(APOLITE_FILEDESCRIPTION "${description}")
+        set(APOLITE_INTERNALNAME "${internal_name}")
+        set(APOLITE_ORIGINALFILENAME "${original_name}")
+        set(_generated "${CMAKE_CURRENT_BINARY_DIR}/${target}_version.rc")
+        configure_file("${CMAKE_SOURCE_DIR}/resources/apolite.rc.in" "${_generated}" @ONLY)
+        target_sources(${target} PRIVATE "${_generated}")
+    endfunction()
+endif()
+
 # The portable DSP core builds on any platform; only the APO shell is Windows.
 add_library(apolite_core STATIC
     src/core/fft.cpp

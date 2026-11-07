@@ -11,6 +11,7 @@
 #include <windows.h>
 #endif
 
+#include "apolite/apolite.h"
 #include "apolite/biquad.h"
 #include "apolite/mathutil.h"
 #include "apolite/channel.h"
@@ -622,6 +623,24 @@ void testSettingsCurve() {
               "preamp offsets the curve");
 }
 
+// -------------------------------------------------------------- version tests
+
+// The version is written in one place, include/apolite/apolite.h, and everything
+// else is derived from it: the CMake project version (checked at configure time)
+// and the Windows VERSIONINFO resource. This catches the case where the string
+// and the numeric components drift apart, which is easy to do by hand.
+void testVersionConsistency() {
+    const std::string expected = std::to_string(APOLITE_VERSION_MAJOR) + "." +
+                                 std::to_string(APOLITE_VERSION_MINOR) + "." +
+                                 std::to_string(APOLITE_VERSION_PATCH);
+    check(expected == APOLITE_VERSION_STRING,
+          "APOLITE_VERSION_STRING matches the major.minor.patch macros");
+
+    check(apolite::kVersionMajor == APOLITE_VERSION_MAJOR, "kVersionMajor matches the macro");
+    check(apolite::kVersionMinor == APOLITE_VERSION_MINOR, "kVersionMinor matches the macro");
+    check(apolite::kVersionPatch == APOLITE_VERSION_PATCH, "kVersionPatch matches the macro");
+}
+
 void testEngineStage() {
     // A capture-only config must be skipped entirely on a playback stage.
     const std::string cfg =
@@ -674,6 +693,7 @@ int main() {
     testSettingsParsePreset();
     testSettingsPreservesUnknownCommands();
     testSettingsCurve();
+    testVersionConsistency();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

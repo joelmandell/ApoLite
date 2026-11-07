@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "apolite/apolite.h"
 #include "apolite/settings.h"
 #include "curve.h"
 
@@ -21,7 +22,14 @@ using apolite::Target;
 using apolite::VoiceSettings;
 
 constexpr wchar_t kWindowClass[] = L"ApoLiteEditorWindow";
-constexpr wchar_t kWindowTitle[] = L"ApoLite";
+
+// Shown in the title bar and the taskbar, so a running editor says which build
+// it is without opening the file properties dialog.
+std::wstring windowTitle() {
+    return L"ApoLite " + std::to_wstring(apolite::kVersionMajor) + L"." +
+           std::to_wstring(apolite::kVersionMinor) + L"." +
+           std::to_wstring(apolite::kVersionPatch);
+}
 
 // Control identifiers.
 enum : int {
@@ -622,7 +630,8 @@ bool EditorWindow::create(HINSTANCE instance) {
     background_ = CreateSolidBrush(RGB(24, 26, 30));
     font_ = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
 
-    hwnd_ = CreateWindowExW(0, kWindowClass, kWindowTitle, WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
+    hwnd_ = CreateWindowExW(0, kWindowClass, windowTitle().c_str(),
+                            WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX,
                             CW_USEDEFAULT, CW_USEDEFAULT, 700, 560, nullptr, nullptr, instance,
                             this);
     if (hwnd_ == nullptr) return false;

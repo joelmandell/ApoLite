@@ -20,3 +20,6 @@ else()
 endif()
 
 install(TARGETS ApoLiteEditor RUNTIME DESTINATION .)
+
+apolite_add_version_resource(ApoLiteEditor VFT_APP
+    "ApoLite editor" "ApoLiteEditor" "ApoLiteEditor.exe")

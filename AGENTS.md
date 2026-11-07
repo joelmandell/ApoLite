@@ -42,6 +42,12 @@ Windows targets building in CI, and do not add Windows headers to `src/core`.
 
 ## Releasing
 
+The version is defined once, in `APOLITE_VERSION_*` in `include/apolite/apolite.h`.
+CMake parses that header, fails the configure step if `project(ApoLite VERSION ...)`
+does not match, and generates a `VERSIONINFO` resource from it for the two Windows
+binaries (`resources/apolite.rc.in`). Bump the header and the `project()` line
+together; `testVersionConsistency` also guards the string against the macros.
+
 1. Bump `APOLITE_VERSION_PATCH`/`_STRING` in `include/apolite/apolite.h` and the
    `project(ApoLite VERSION ...)` line in `CMakeLists.txt`.
 2. Push to `main` and wait for both CI jobs to pass.
@@ -51,3 +57,7 @@ Windows targets building in CI, and do not add Windows headers to `src/core`.
    built from the CI artifacts plus `LICENSE` and `config/voice-mic.txt`.
 
 `gh` needs `GH_TOKEN` set from `GITHUB_TOKEN` in this environment.
+
+Note: `APO_REG_PROPERTIES` carries only major/minor, so the patch digit is not
+visible in the APO properties. It reaches the user through the VERSIONINFO
+resource (file properties dialog) and the editor window title.

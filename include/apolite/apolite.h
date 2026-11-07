@@ -19,6 +19,18 @@
 #define APOLITE_VENDOR_NAME L"ApoLite"
 #define APOLITE_FRIENDLY_NAME L"ApoLite"
 
+namespace apolite {
+
+// The APO registration schema (APO_REG_PROPERTIES) carries only a major and a
+// minor version, so the patch digit has no field there. It is exposed through
+// the binary's VERSIONINFO resource instead, which is what Windows shows in the
+// file properties dialog.
+constexpr unsigned kVersionMajor = APOLITE_VERSION_MAJOR;
+constexpr unsigned kVersionMinor = APOLITE_VERSION_MINOR;
+constexpr unsigned kVersionPatch = APOLITE_VERSION_PATCH;
+
+}  // namespace apolite
+
 // GUID constants are only meaningful on Windows; the DSP core and the test
 // suite build on any platform without <guiddef.h>.
 #if defined(_WIN32) && !defined(APOLITE_NO_GUIDS)
@@ -26,9 +38,6 @@
 #include <guiddef.h>
 
 namespace apolite {
-
-constexpr unsigned kVersionMajor = APOLITE_VERSION_MAJOR;
-constexpr unsigned kVersionMinor = APOLITE_VERSION_MINOR;
 
 inline constexpr GUID kPostMixClsid = APOLITE_POST_MIX_GUID;
 inline constexpr GUID kPreMixClsid = APOLITE_PRE_MIX_GUID;

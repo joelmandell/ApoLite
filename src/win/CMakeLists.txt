@@ -28,3 +28,6 @@ else()
 endif()
 
 install(TARGETS ApoLite RUNTIME DESTINATION .)
+
+apolite_add_version_resource(ApoLite VFT_DLL
+    "ApoLite audio processing object" "ApoLite" "ApoLite.dll")

@@ -159,6 +159,21 @@ or directly:
 g++ -std=c++20 -Iinclude tests/test_apolite.cpp src/core/*.cpp -o test_apolite && ./test_apolite
 ```
 
+## Releasing
+
+The version is defined once, in `include/apolite/apolite.h`
+(`APOLITE_VERSION_*`). Everything else is derived from it:
+
+* `project(ApoLite VERSION ...)` in `CMakeLists.txt` must match
+  `APOLITE_VERSION_STRING`; CMake fails the configure step if it does not.
+* The Windows binaries get a `VERSIONINFO` resource generated from the same
+  macros, so the patch digit shows up in the file properties dialog. The APO
+  registration schema has no field for it, which is why the resource exists.
+
+To cut a release, bump the header, keep the `project()` line in step, push, wait
+for CI, and package the `ApoLite-windows` artifact from that run. Do not ship
+locally built binaries.
+
 ## Compatibility notes
 
 ApoLite deliberately targets Windows 11 only. It uses Windows 11 audio APIs and
