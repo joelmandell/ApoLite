@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(ApoLite VERSION 1.0.1 LANGUAGES CXX)
+project(ApoLite VERSION 1.0.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -87,6 +87,7 @@ add_library(apolite_core STATIC
     src/core/engine.cpp
     src/core/impulse.cpp
     src/core/settings.cpp
+    src/core/registry.cpp
 )
 target_include_directories(apolite_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
@@ -100,6 +101,7 @@ endif()
 option(APOLITE_BUILD_APO "Build the Windows APO DLL" ON)
 option(APOLITE_BUILD_CLI "Build the apolite command-line tool" ON)
 option(APOLITE_BUILD_GUI "Build the ApoLite editor (Windows only)" ON)
+option(APOLITE_BUILD_SETUP "Build the ApoLite device setup tool (Windows only)" ON)
 option(APOLITE_BUILD_TESTS "Build the test suite" ON)
 option(APOLITE_BUILD_BENCH "Build the processing-cost benchmark" ON)
 
@@ -124,6 +126,10 @@ endif()
 
 if(WIN32 AND APOLITE_BUILD_GUI)
     add_subdirectory(src/gui)
+endif()
+
+if(WIN32 AND APOLITE_BUILD_SETUP)
+    add_subdirectory(src/setup)
 endif()
 
 if(APOLITE_BUILD_TESTS)

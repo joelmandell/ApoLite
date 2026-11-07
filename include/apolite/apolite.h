@@ -4,8 +4,8 @@
 
 #define APOLITE_VERSION_MAJOR 1
 #define APOLITE_VERSION_MINOR 0
-#define APOLITE_VERSION_PATCH 1
-#define APOLITE_VERSION_STRING "1.0.1"
+#define APOLITE_VERSION_PATCH 2
+#define APOLITE_VERSION_STRING "1.0.2"
 
 // ApoLite's own APO CLSIDs (independent from Equalizer APO's).
 // {8F2C7A14-3B6E-4D51-9C2A-7E5F1D0B4A31}
@@ -14,6 +14,12 @@
 // {8F2C7A15-3B6E-4D51-9C2A-7E5F1D0B4A31}
 #define APOLITE_PRE_MIX_GUID \
     { 0x8f2c7a15, 0x3b6e, 0x4d51, { 0x9c, 0x2a, 0x7e, 0x5f, 0x1d, 0x0b, 0x4a, 0x31 } }
+
+// The same two CLSIDs as registry strings. Windows names an endpoint's APO by
+// GUID string, so the installer needs this form; a test checks it matches the
+// brace initialisers above.
+#define APOLITE_POST_MIX_GUID_STRING L"{8F2C7A14-3B6E-4D51-9C2A-7E5F1D0B4A31}"
+#define APOLITE_PRE_MIX_GUID_STRING L"{8F2C7A15-3B6E-4D51-9C2A-7E5F1D0B4A31}"
 
 // Default config location: %ProgramData%\ApoLite\config\config.txt
 #define APOLITE_VENDOR_NAME L"ApoLite"
