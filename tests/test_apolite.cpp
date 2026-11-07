@@ -155,6 +155,49 @@ void testFir() {
     checkNear(peak, std::pow(10.0, 6.0 / 20.0), 0.01, "FIR convolution applies 6 dB");
 }
 
+// A convolver call of any length must return that many samples without hanging,
+// and must agree with a direct time-domain convolution at zero latency. Calls
+// whose length was not a multiple of the block size previously looped forever,
+// which hung the audio thread for any GraphicEQ or Convolution config.
+void testFirArbitraryBlockSizes() {
+    const size_t block = 256;
+    const size_t len = 2048;
+
+    // A short FIR with a tail, so the result is not just a scaled copy.
+    std::vector<double> h(len, 0.0);
+    h[0] = 0.6;
+    h[1] = 0.3;
+    h[7] = -0.1;
+    h[63] = 0.05;
+
+    std::vector<double> x(len);
+    for (size_t i = 0; i < len; ++i)
+        x[i] = std::sin(2.0 * apolite::kPi * 997.0 * i / 48000.0) * 0.5;
+
+    // Direct convolution, the definition the partitioned version must match.
+    std::vector<double> ref(len, 0.0);
+    for (size_t n = 0; n < len; ++n)
+        for (size_t k = 0; k < h.size() && k <= n; ++k) ref[n] += h[k] * x[n - k];
+
+    // Sizes include ones that are not multiples of the block size (224, 480,
+    // 1000) and the degenerate size of one sample.
+    const size_t sizes[] = {256, 224, 480, 1000, 1};
+    for (size_t chunk : sizes) {
+        apolite::FirConvolver c(h, block);
+        std::vector<double> y(len, 0.0);
+        for (size_t off = 0; off < len; off += chunk) {
+            const size_t m = std::min(chunk, len - off);
+            c.process(x.data() + off, y.data() + off, m);
+        }
+        double maxErr = 0.0;
+        for (size_t i = 0; i < len; ++i) maxErr = std::max(maxErr, std::fabs(y[i] - ref[i]));
+        char what[96];
+        std::snprintf(what, sizeof(what),
+                      "convolution in %zu-sample calls matches direct convolution", chunk);
+        checkNear(maxErr, 0.0, 1e-9, what);
+    }
+}
+
 // ------------------------------------------------------- Expression tests
 
 void testExpression() {
@@ -323,6 +366,36 @@ void testEngineGraphicEq() {
     for (size_t i = 0; i < n; ++i)
         maxErr = std::max(maxErr, std::fabs(static_cast<double>(buf[i]) - reference[i]));
     checkNear(maxErr, 0.0, 1e-6, "flat graphic EQ is transparent");
+}
+
+// The engine must accept a host block size that is not a multiple of the
+// convolver's internal 256-frame block. A 480-frame block (10 ms at 48 kHz) is
+// what Windows commonly delivers, and it previously hung the audio thread.
+void testEngineGraphicEqArbitraryBlocks() {
+    const std::string cfg = writeTemp("graphiceq_blocks.txt", "GraphicEQ: 20 0; 20000 0\n");
+    apolite::Engine engine;
+    engine.configure(48000.0, 1, 1, 0, false, false, true, "Speakers", "Speakers", "");
+    check(engine.loadConfiguration(cfg) == 1, "graphic EQ entry count for block test");
+
+    // Process the same signal as one long call and as 480-frame calls; a flat
+    // graphic EQ is transparent, so both must reproduce the input.
+    const size_t n = 4800;  // ten 480-frame blocks
+    std::vector<float> input(n);
+    for (size_t i = 0; i < n; ++i)
+        input[i] = static_cast<float>(std::sin(2.0 * apolite::kPi * 1000.0 * i / 48000.0));
+
+    std::vector<float> whole = input;
+    engine.processInterleaved(whole.data(), n);
+
+    std::vector<float> chunked = input;
+    const size_t chunk = 480;
+    for (size_t off = 0; off < n; off += chunk)
+        engine.processInterleaved(chunked.data() + off, std::min(chunk, n - off));
+
+    double maxErr = 0.0;
+    for (size_t i = 0; i < n; ++i)
+        maxErr = std::max(maxErr, std::fabs(static_cast<double>(chunked[i]) - whole[i]));
+    checkNear(maxErr, 0.0, 1e-6, "graphic EQ is unchanged by 480-frame host blocks");
 }
 
 void testEngineIf() {
@@ -580,6 +653,7 @@ int main() {
     testFft();
     testBiquad();
     testFir();
+    testFirArbitraryBlockSizes();
     testExpression();
     testChannelLayout();
     testGainInterpolator();
@@ -589,6 +663,7 @@ int main() {
     testEngineCopy();
     testEngineChannelSelect();
     testEngineGraphicEq();
+    testEngineGraphicEqArbitraryBlocks();
     testEngineIf();
     testEngineElseBranch();
     testEngineDevice();

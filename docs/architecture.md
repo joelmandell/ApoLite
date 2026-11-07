@@ -69,6 +69,13 @@ ApoLite primes each convolver with a block of silence when it is prepared, so th
 first real block produces the correct output immediately. Measured latency is
 zero samples.
 
+The host may hand the engine any block size, and Windows commonly delivers 480
+frames (10 ms at 48 kHz), which is not a multiple of the 256-sample convolver
+block. A partial block is transformed against a zero-padded tail without
+committing it to the delay line, so output for the samples that are present is
+final and no latency is added. An earlier version advanced in whole blocks only,
+so a partial block looped forever and hung the audio thread.
+
 ## Dynamics
 
 `CompressorFilter` is a feed-forward peak compressor. A peak detector with

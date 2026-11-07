@@ -53,11 +53,21 @@ option(APOLITE_BUILD_APO "Build the Windows APO DLL" ON)
 option(APOLITE_BUILD_CLI "Build the apolite command-line tool" ON)
 option(APOLITE_BUILD_GUI "Build the ApoLite editor (Windows only)" ON)
 option(APOLITE_BUILD_TESTS "Build the test suite" ON)
+option(APOLITE_BUILD_BENCH "Build the processing-cost benchmark" ON)
 
 if(APOLITE_BUILD_CLI)
     add_executable(apolite_cli src/cli/main.cpp)
     target_link_libraries(apolite_cli PRIVATE apolite_core)
     set_target_properties(apolite_cli PROPERTIES OUTPUT_NAME apolite)
+endif()
+
+if(APOLITE_BUILD_BENCH)
+    add_executable(apolite_bench tools/bench.cpp)
+    target_link_libraries(apolite_bench PRIVATE apolite_core)
+    # The benchmark reads config/voice-mic.txt, so run it from the source root.
+    set_target_properties(apolite_bench PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 if(WIN32 AND APOLITE_BUILD_APO)

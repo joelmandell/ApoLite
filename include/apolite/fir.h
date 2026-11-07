@@ -19,6 +19,9 @@ std::vector<double> designMinimumPhaseFir(size_t length, double sampleRate,
 
 // Uniform-partitioned overlap-save convolver (frequency-domain delay line).
 // Latency is one block, so prefer a small block size for live use.
+//
+// `process` accepts any sample count: a call may ask for fewer samples than one
+// block, or for many blocks at once.
 class FirConvolver {
 public:
     FirConvolver(std::vector<double> taps, size_t blockSize = 256);
@@ -32,7 +35,12 @@ public:
     size_t tapCount() const { return taps_; }
 
 private:
-    void processBlock();
+    // Transform the current input block into outBuf_. When `commit` is false the
+    // block is incomplete: the transform is computed against a zero-padded tail
+    // and the pipeline state is left untouched, so the same block can be
+    // transformed again as more input arrives. Outputs for the filled part are
+    // already final, because the padding cannot influence them.
+    void transformBlock(bool commit);
 
     size_t block_ = 0;
     size_t fftSize_ = 0;
@@ -45,13 +53,21 @@ private:
     std::vector<std::vector<cplx>> fdl_;  // frequency-domain delay line
     size_t fdlPos_ = 0;
 
-    std::vector<double> inBuf_;   // pending input, length block_
-    std::vector<double> outBuf_;  // pending output, length block_
+    std::vector<double> inBuf_;   // input of the block being filled, length block_
     size_t inFill_ = 0;
-    size_t outFill_ = 0;
-    size_t outRead_ = 0;
+    std::vector<double> outBuf_;  // output of the block just computed
 
-    std::vector<double> prev_;     // last block of input
+    // How many outputs of the current block have been returned. A partial block
+    // is transformed on each call so its outputs can be returned immediately;
+    // because the transform is not committed, they are recomputed when the block
+    // completes, and this says how many to skip.
+    size_t blockEmitted_ = 0;
+
+    // Scratch for an uncommitted transform, so it does not allocate. Sized in
+    // the constructor because the audio thread must not allocate.
+    std::vector<cplx> savedFdlEntry_;
+
+    std::vector<double> prev_;     // last committed block of input
     std::vector<double> timeBuf_;  // 2*block_
     std::vector<cplx> freqBuf_;    // bins_
     std::vector<cplx> acc_;        // bins_

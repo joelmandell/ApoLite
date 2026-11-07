@@ -88,14 +88,14 @@ FirConvolver::FirConvolver(std::vector<double> taps, size_t blockSize)
     }
 
     fdl_.assign(partitions_, std::vector<cplx>(bins_, cplx(0.0, 0.0)));
+    savedFdlEntry_.assign(bins_, cplx(0.0, 0.0));
     fdlPos_ = 0;
 
-    // Prime the overlap-save pipeline with one zero block so that the first
-    // real block produces conv(x, h)[0..block-1].
-    processBlock();
+    // Prime the overlap-save pipeline with one zero block, so the first real
+    // block produces conv(x, h)[0..block-1] with no added latency.
+    transformBlock(true);
     inFill_ = 0;
-    outFill_ = 0;
-    outRead_ = 0;
+    blockEmitted_ = 0;
 }
 
 void FirConvolver::reset() {
@@ -103,22 +103,29 @@ void FirConvolver::reset() {
     std::fill(outBuf_.begin(), outBuf_.end(), 0.0);
     std::fill(prev_.begin(), prev_.end(), 0.0);
     for (auto& v : fdl_) std::fill(v.begin(), v.end(), cplx(0.0, 0.0));
-    inFill_ = outFill_ = outRead_ = 0;
-    fdlPos_ = 0;
-    processBlock();
     inFill_ = 0;
-    outFill_ = 0;
-    outRead_ = 0;
+    fdlPos_ = 0;
+    blockEmitted_ = 0;
+    transformBlock(true);
+    inFill_ = 0;
+    blockEmitted_ = 0;
 }
 
-void FirConvolver::processBlock() {
-    // Build [prev | current] and transform.
+void FirConvolver::transformBlock(bool commit) {
+    // The last block of input is prepended, so this is overlap-save over
+    // [prev | current]. An incomplete block is zero-padded to full length; the
+    // padding sits at indices >= inFill_ and cannot affect earlier outputs, so
+    // those outputs are final even though the transform is not committed.
     for (size_t i = 0; i < block_; ++i) timeBuf_[i] = prev_[i];
     for (size_t i = 0; i < block_; ++i) timeBuf_[block_ + i] = inBuf_[i];
     fft_.forward(timeBuf_.data(), freqBuf_.data());
 
-    fdlPos_ = (fdlPos_ + partitions_ - 1) % partitions_;
-    fdl_[fdlPos_] = freqBuf_;
+    // The delay line advances by one slot per block. For an uncommitted block
+    // the write is undone afterwards, so the next call sees the same state.
+    const size_t nextPos = (fdlPos_ + partitions_ - 1) % partitions_;
+    if (!commit) savedFdlEntry_ = fdl_[nextPos];
+    fdl_[nextPos] = freqBuf_;
+    fdlPos_ = nextPos;
 
     std::fill(acc_.begin(), acc_.end(), cplx(0.0, 0.0));
     size_t idx = fdlPos_;
@@ -129,39 +136,49 @@ void FirConvolver::processBlock() {
         idx = (idx + 1) % partitions_;
     }
 
-    std::vector<double> y(fftSize_);
-    fft_.inverse(acc_.data(), y.data());
-    for (size_t i = 0; i < block_; ++i) outBuf_[i] = y[block_ + i];
+    fft_.inverse(acc_.data(), timeBuf_.data());
+    for (size_t i = 0; i < block_; ++i) outBuf_[i] = timeBuf_[block_ + i];
 
-    for (size_t i = 0; i < block_; ++i) prev_[i] = inBuf_[i];
+    if (commit) {
+        std::copy(inBuf_.begin(), inBuf_.end(), prev_.begin());
+        // The block is consumed, so clear it. A later partial block must be
+        // padded with silence rather than stale samples.
+        std::fill(inBuf_.begin(), inBuf_.end(), 0.0);
+    } else {
+        fdl_[fdlPos_] = savedFdlEntry_;
+        fdlPos_ = (fdlPos_ + 1) % partitions_;
+    }
 }
 
 void FirConvolver::process(const double* in, double* out, size_t n) {
-    // The pipeline is primed with one zero block, so output is produced at the
-    // same rate as input is consumed and output[i] == conv(x, h)[i - block_].
-    size_t inPos = 0;
-    size_t outPos = 0;
-    while (outPos < n) {
-        if (outRead_ < outFill_) {
-            const size_t take = std::min(outFill_ - outRead_, n - outPos);
-            std::copy(outBuf_.begin() + outRead_, outBuf_.begin() + outRead_ + take,
-                      out + outPos);
-            outRead_ += take;
-            outPos += take;
-            if (outRead_ == outFill_) outRead_ = outFill_ = 0;
-            continue;
-        }
-
-        const size_t take = std::min(block_ - inFill_, n - inPos);
-        std::copy(in + inPos, in + inPos + take, inBuf_.begin() + inFill_);
+    // Output is produced for exactly the samples consumed, so convolution adds
+    // no latency, and the call may be any length.
+    //
+    // The previous version advanced in whole blocks only, so a call whose length
+    // was not a multiple of the block size looped forever: GraphicEqFilter
+    // chunks its input at 256 frames, so a 480-frame host block hung the audio
+    // thread. An incomplete block is now transformed with a zero-padded tail,
+    // which yields final output for the samples that are present.
+    size_t done = 0;
+    while (done < n) {
+        const size_t take = std::min(block_ - inFill_, n - done);
+        std::copy(in + done, in + done + take, inBuf_.begin() + inFill_);
         inFill_ += take;
-        inPos += take;
+        done += take;
 
-        if (inFill_ == block_) {
-            processBlock();
+        const bool full = inFill_ == block_;
+        transformBlock(full);
+
+        // Out[blockEmitted_, inFill_) is final either way, and the count is
+        // exactly `take`. `blockEmitted_` then tracks how much of this block has
+        // been returned, for the case where the block completes later.
+        std::copy(outBuf_.begin() + blockEmitted_, outBuf_.begin() + inFill_, out + done - take);
+
+        if (full) {
             inFill_ = 0;
-            outFill_ = block_;
-            outRead_ = 0;
+            blockEmitted_ = 0;
+        } else {
+            blockEmitted_ = inFill_;
         }
     }
 }
