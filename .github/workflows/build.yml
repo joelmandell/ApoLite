@@ -42,8 +42,8 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
 
-      # The editor is a single self-contained executable, so it ships next to
-      # the DLL.
+      # The editor and setup tool are self-contained executables, so they ship
+      # next to the DLL.
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
@@ -51,4 +51,5 @@ jobs:
           path: |
             build/**/ApoLite.dll
             build/**/ApoLiteEditor.exe
+            build/**/ApoLiteSetup.exe
           if-no-files-found: warn

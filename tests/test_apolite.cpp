@@ -21,6 +21,7 @@
 #include "apolite/fft.h"
 #include "apolite/fir.h"
 #include "apolite/gain.h"
+#include "apolite/registry.h"
 #include "apolite/settings.h"
 
 namespace {
@@ -641,6 +642,113 @@ void testVersionConsistency() {
     check(apolite::kVersionPatch == APOLITE_VERSION_PATCH, "kVersionPatch matches the macro");
 }
 
+// --------------------------------------------------------------- registry tests
+
+// Windows only loads an APO that an endpoint's FxProperties key names, so the
+// layout the installer writes has to be exactly right or the APO is invisible.
+// These cover the decisions, not the registry writes themselves.
+void testRegistryLayout() {
+    using namespace apolite::registry;
+
+    // A driver that publishes only the legacy slots must be driven through them.
+    check(chooseInstallMode(true, true, false, false, false, false) == InstallMode::LfxGfx,
+          "legacy-only driver selects LFX/GFX");
+    check(chooseInstallMode(true, false, false, false, false, false) == InstallMode::LfxGfx,
+          "LFX alone selects LFX/GFX");
+    // Any modern slot present means the modern path is correct; writing legacy
+    // names as well would make Windows ignore the driver's own APOs.
+    check(chooseInstallMode(true, true, true, false, false, false) == InstallMode::SfxEfx,
+          "a driver with SFX is not treated as legacy-only");
+    check(chooseInstallMode(false, false, true, true, true, false) == InstallMode::SfxEfx,
+          "modern driver selects SFX/EFX");
+    check(chooseInstallMode(false, false, false, false, false, false) == InstallMode::SfxEfx,
+          "a driver with no APOs selects SFX/EFX");
+    // Combined endpoints (Bluetooth) cannot host EFX.
+    check(chooseInstallMode(false, false, true, true, false, true) == InstallMode::SfxMfx,
+          "combined endpoint avoids EFX");
+
+    // Capture has no post-mix stage; a plan with one would write a slot that
+    // never runs, and on a capture endpoint there is nothing to write it to.
+    const auto capturePlan = slotPlan(InstallMode::SfxEfx, /*capture=*/true);
+    check(capturePlan.size() == 1, "capture plan has a single slot");
+    check(capturePlan[0].preMix, "capture plan uses the pre-mix slot");
+    check(std::wstring(capturePlan[0].slot) == kSfx, "capture plan writes SFX");
+
+    const auto renderPlan = slotPlan(InstallMode::SfxEfx, /*capture=*/false);
+    check(renderPlan.size() == 2, "render plan has two slots");
+    check(renderPlan[0].preMix && !renderPlan[1].preMix, "render plan is pre-mix then post-mix");
+    check(std::wstring(renderPlan[1].slot) == kEfx, "render plan writes EFX post-mix");
+
+    const auto mfxPlan = slotPlan(InstallMode::SfxMfx, /*capture=*/false);
+    check(mfxPlan.size() == 2 && std::wstring(mfxPlan[1].slot) == kMfx,
+          "combined endpoint writes MFX post-mix");
+
+    const auto legacyPlan = slotPlan(InstallMode::LfxGfx, /*capture=*/false);
+    check(legacyPlan.size() == 2 && std::wstring(legacyPlan[0].slot) == kLfx &&
+              std::wstring(legacyPlan[1].slot) == kGfx,
+          "legacy plan writes LFX and GFX");
+
+    // A legacy capture endpoint has only the pre-mix slot, so GFX must not be
+    // written; there is no such value on a capture endpoint.
+    const auto legacyCapture = slotPlan(InstallMode::LfxGfx, /*capture=*/true);
+    check(legacyCapture.size() == 1 && std::wstring(legacyCapture[0].slot) == kLfx,
+          "legacy capture plan writes LFX only");
+
+    const auto mfxCapture = slotPlan(InstallMode::SfxMfx, /*capture=*/true);
+    check(mfxCapture.size() == 1 && std::wstring(mfxCapture[0].slot) == kSfx,
+          "combined capture plan writes SFX only");
+
+    // SFX/MFX/EFX are ignored without a processing mode, so every modern slot
+    // must carry one.
+    for (const auto& a : renderPlan) {
+        check(a.writeModes && a.modes != nullptr, "modern slot writes a processing mode");
+    }
+    for (const auto& a : legacyPlan) {
+        check(!a.writeModes && a.modes == nullptr, "legacy slot writes no processing mode");
+    }
+
+    // The CLSID strings the installer writes must match the GUIDs the APO
+    // registers. These are separate literals, so they can drift.
+    check(std::wstring(clsidFor(true)) == APOLITE_PRE_MIX_GUID_STRING,
+          "pre-mix CLSID string is the pre-mix GUID");
+    check(std::wstring(clsidFor(false)) == APOLITE_POST_MIX_GUID_STRING,
+          "post-mix CLSID string is the post-mix GUID");
+    check(isApoLiteClsid(L"{8f2c7a15-3b6e-4d51-9c2a-7e5f1d0b4a31}"), "CLSID match ignores case");
+    check(!isApoLiteClsid(L"{00000000-0000-0000-0000-000000000000}"), "other CLSIDs are not ours");
+    check(isCaptureEndpoint(kCaptureKey), "capture tree is recognised");
+    check(!isCaptureEndpoint(kRenderKey), "render tree is not capture");
+
+    // These names come from Windows, not from ApoLite, and a typo in one fails
+    // silently: the APO is written somewhere Windows never looks. Pin them.
+    check(std::wstring(kLfx) == L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},1", "LFX value name");
+    check(std::wstring(kGfx) == L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},2", "GFX value name");
+    check(std::wstring(kSfx) == L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},5", "SFX value name");
+    check(std::wstring(kMfx) == L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},6", "MFX value name");
+    check(std::wstring(kEfx) == L"{d04e05a6-594b-4fb6-a80d-01af5eed7d1d},7", "EFX value name");
+    check(std::wstring(kSfxModes) == L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},5", "SFX modes name");
+    check(std::wstring(kMfxModes) == L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},6", "MFX modes name");
+    check(std::wstring(kEfxModes) == L"{d3993a3f-99c2-4402-b5ec-a92a0367664b},7", "EFX modes name");
+    check(std::wstring(kDefaultMode) == L"{C18E2F7E-933D-4965-B7D1-1EEF228D2AF3}",
+          "default processing mode");
+    check(std::wstring(kDisableEnhancements) == L"{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5",
+          "disable-enhancements value name");
+    check(std::wstring(kCombinedDevice) == L"{b3f8fa53-0004-438e-9003-51a46e139bfc},41",
+          "combined-device value name");
+    // The combined-device flag is read from Properties, not FxProperties.
+    check(std::wstring(kPropertiesSubkey) == L"Properties", "combined flag lives under Properties");
+    check(std::wstring(kRenderKey) ==
+              L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Render",
+          "render tree path");
+    check(std::wstring(kCaptureKey) ==
+              L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\MMDevices\\Audio\\Capture",
+          "capture tree path");
+    check(std::wstring(kAudioSettingsKey) ==
+              L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Audio",
+          "audio settings key path");
+    check(std::wstring(kProtectedAudioDgValue) == L"DisableProtectedAudioDG",
+          "protected audio value name");
+}
+
 void testEngineStage() {
     // A capture-only config must be skipped entirely on a playback stage.
     const std::string cfg =
@@ -694,6 +802,7 @@ int main() {
     testSettingsPreservesUnknownCommands();
     testSettingsCurve();
     testVersionConsistency();
+    testRegistryLayout();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

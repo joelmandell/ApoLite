@@ -33,7 +33,32 @@ To undo it:
 regsvr32 /u ApoLite.dll
 ```
 
-## 3. Install a configuration
+## 3. Attach the APO to a device
+
+This step is required, and `regsvr32` does **not** do it. Windows loads an APO
+only when the audio endpoint's own registry key names it:
+
+```
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio
+    \(Render|Capture)\(endpoint GUID)\FxProperties
+```
+
+Without it the APO is registered but never loaded, so it never appears in the
+**Enhancements** tab. Run the setup tool, elevated, from the folder holding
+`ApoLite.dll`:
+
+```bat
+ApoLiteSetup list                 :: devices, and whether ApoLite is attached
+ApoLiteSetup install 1            :: attach to device 1 (or "all")
+ApoLiteSetup status               :: check the two machine-wide prerequisites
+ApoLiteSetup uninstall 1          :: detach and restore the driver's own APOs
+```
+
+`install` also sets `DisableProtectedAudioDG`, which the audio engine requires
+before it will load an unsigned APO. That setting is machine-wide and weakens the
+protected audio path; see the note below.
+
+## 4. Install a configuration
 
 The easiest way is to run **`ApoLiteEditor.exe`** and press **Apply**. It writes
 `%ProgramData%\ApoLite\config\config.txt` for you. A second launch just
@@ -51,7 +76,7 @@ chain on the next audio block, so there is no need to restart anything while you
 tune. The editor and the file are interchangeable: the editor reads whatever is
 in the file, including changes you made by hand.
 
-## 4. Enable the effect on a device
+## 5. Enable the effect on a device
 
 1. Open **Settings → System → Sound → More sound settings**, or run
    `mmsys.cpl`.
@@ -61,7 +86,19 @@ in the file, including changes you made by hand.
 
 If you do not see an **Enhancements** tab, the device driver does not expose the
 system effect slot. This is a driver limitation, not an ApoLite one; ApoLite is
-an *effect*, not a separate virtual device.
+an *effect*, not a separate virtual device. Use `ApoLiteSetup list` to see which
+endpoints Windows reports.
+
+### Note on the driver's own effects
+
+A device slot holds one APO. Attaching ApoLite replaces whatever the driver had
+there, and the original value is saved under
+`HKLM\SOFTWARE\ApoLite\Child APOs` so `uninstall` can put it back.
+
+ApoLite does **not** call the replaced APO. Equalizer APO chains to it so the
+driver's own effects keep working; ApoLite does not, so the driver's effects on
+that slot are inactive while ApoLite is attached. On the microphone path this is
+usually wanted. `ApoLiteSetup uninstall` restores the original exactly.
 
 ## Verifying it is running
 
@@ -83,16 +120,23 @@ attached debugger.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `regsvr32` reports a load error | Missing dependency, or not elevated | Run elevated; confirm the DLL is x64 |
-| No **Enhancements** tab | Driver does not support system effects | Use a device that does, or a virtual audio cable |
+| ApoLite missing from **Enhancements** | The APO is not attached to the endpoint | Run `ApoLiteSetup install <index>` elevated |
+| ApoLite missing from **Enhancements** after that | `DisableProtectedAudioDG` not set | Run `ApoLiteSetup status`; `install` sets it |
+| No **Enhancements** tab at all | Driver does not support system effects | Use a device that does, or a virtual audio cable |
 | Effect enabled but no change | Config file not found | Confirm `%ProgramData%\ApoLite\config\config.txt` exists |
 | Apply fails with a write error | The config folder needs administrator rights | Run the editor as administrator |
 | Clicks on enable/disable | Endpoint format change | Expected once; ApoLite adds no latency of its own |
+| Driver's own effects stopped | ApoLite replaced the driver's APO in that slot | Expected; `ApoLiteSetup uninstall` restores it |
 
 ## Uninstalling
 
 ```bat
+ApoLiteSetup uninstall all
 regsvr32 /u ApoLite.dll
 ```
 
 Then delete `%ProgramData%\ApoLite`. Unregistering removes the `CLSID` keys and
-the `RegisterAPO` entries; nothing else is written outside that folder.
+the `RegisterAPO` entries; `ApoLiteSetup uninstall` restores each device's
+original APOs and removes `HKLM\SOFTWARE\ApoLite`. Nothing else is written
+outside that folder, except `DisableProtectedAudioDG`, which is shared with any
+other unsigned APO and is left alone.

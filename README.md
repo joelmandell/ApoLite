@@ -114,17 +114,31 @@ Output:
 
 * `ApoLite.dll` - the audio processing object.
 * `ApoLiteEditor.exe` - the editor. A single self-contained file.
+* `ApoLiteSetup.exe` - attaches the APO to a device. Required; see below.
 * `apolite.exe` - a command-line tool for validating configurations offline.
 
 ## Installing
 
-An APO must be registered from an elevated prompt. From the `build` directory:
+Two steps. An APO must be registered from an elevated prompt, from the `build`
+directory:
 
 ```bat
 regsvr32 ApoLite.dll
 ```
 
-Then run `ApoLiteEditor.exe` and press **Apply**, which writes
+Then it must be attached to the device you want it on:
+
+```bat
+ApoLiteSetup list
+ApoLiteSetup install 1
+```
+
+`regsvr32` alone is not enough. Windows loads an APO only when the audio
+endpoint's own registry key names it, and only `ApoLiteSetup` writes that
+association. Without it the APO is registered but never loaded, so it never
+appears under **Enhancements**.
+
+After that, run `ApoLiteEditor.exe` and press **Apply**, which writes
 `%ProgramData%\ApoLite\config\config.txt`. Open the **Sound** control panel,
 select your microphone, and enable the ApoLite effect under **Enhancements**.
 The change takes effect immediately.
@@ -132,6 +146,7 @@ The change takes effect immediately.
 To remove it:
 
 ```bat
+ApoLiteSetup uninstall all
 regsvr32 /u ApoLite.dll
 ```
 

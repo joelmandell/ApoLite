@@ -6,27 +6,55 @@ compatibility. MIT, Copyright 2026 Joel Mandell.
 ## Layout
 
 * `include/apolite/`, `src/core/` - platform-independent DSP. This is where the
-  tests point, so it must not depend on Windows.
+  tests point, so it must not depend on Windows. `registry.cpp` is the exception
+  that proves the rule: it holds the Windows endpoint registry layout as data, so
+  the decisions can be tested on Linux and only the writes are Windows-only.
 * `src/win/` - the APO shell (COM, `APOProcess`).
 * `src/gui/` - the editor.
+* `src/setup/` - `ApoLiteSetup.exe`, which attaches the APO to an audio endpoint.
+  Windows-only. `win_registry.cpp` needs `aclapi.h` for the ownership change.
 * `src/cli/` - headless runner, useful for testing a config on Linux.
 * `tools/bench.cpp` - cost benchmark, built only with `-DAPOLITE_BUILD_BENCH=ON`.
 
 ## Building and testing here
 
-There is no cmake or MSVC in the dev container, so build the core directly:
+`cmake` is not on `PATH` but is installed at `~/.local/bin/cmake` (pip). A mingw
+cross-compiler is installed, so the Windows targets can be compiled locally
+instead of waiting on CI:
 
 ```sh
+# core suite, fast
 g++ -O2 -std=c++20 -Wall -Wextra -Iinclude tests/test_apolite.cpp src/core/*.cpp -o /tmp/tests && /tmp/tests
-g++ -O3 -std=c++20 -Iinclude tools/bench.cpp src/core/*.cpp -o /tmp/bench && /tmp/bench
+
+# every Windows target, including the APO, editor and setup tool
+~/.local/bin/cmake -B /tmp/mb -S . -DCMAKE_SYSTEM_NAME=Windows \
+    -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
+    -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres -DAPOLITE_BUILD_TESTS=OFF
+~/.local/bin/cmake --build /tmp/mb --parallel
 ```
 
+The mingw build is not a substitute for MSVC: it does not catch MSVC-only
+warnings, and `-municode` is needed for the `wmain` entry point. Use it to catch
+compile errors early, and still let CI be the gate.
+
 CI (`.github/workflows/build.yml`) runs the core suite on Linux gcc and builds the
-Windows targets on MSVC. Windows-only code is not compiled locally, so keep the
-Windows targets building in CI, and do not add Windows headers to `src/core`.
+Windows targets on MSVC. Do not add Windows headers to `src/core`.
 
 ## Contracts that are easy to break
 
+* **An APO must be attached to a device, not just registered.** `regsvr32` writes
+  the COM class and calls `RegisterAPO`; neither makes Windows load the APO.
+  Windows loads it only when the endpoint's own key names it, under
+  `MMDevices\Audio\{Render|Capture}\<endpoint GUID>\FxProperties`. That
+  association is what `ApoLiteSetup` writes, and without it the APO never shows
+  up in the Enhancements tab. `include/apolite/registry.h` documents the value
+  names; `testRegistryLayout` covers the decisions. Also required:
+  `DisableProtectedAudioDG = 1` under `...\CurrentVersion\Audio`, or the engine
+  refuses to load an unsigned APO.
+* **Do not read the live FxProperties key to decide the install mode.** Once
+  installed it holds ApoLite's own CLSIDs, so a reinstall would pick a different
+  mode and orphan the slot already owned. Use the saved originals
+  (`HKLM\SOFTWARE\ApoLite\Child APOs`); `driverSlotPresent` does this.
 * **Zero added latency.** `docs/architecture.md` and `README.md` both promise it,
   and `FirConvolver` is written to deliver it. Any change that buffers output
   (for example to handle odd block sizes with an output FIFO) breaks the promise
@@ -44,9 +72,9 @@ Windows targets building in CI, and do not add Windows headers to `src/core`.
 
 The version is defined once, in `APOLITE_VERSION_*` in `include/apolite/apolite.h`.
 CMake parses that header, fails the configure step if `project(ApoLite VERSION ...)`
-does not match, and generates a `VERSIONINFO` resource from it for the two Windows
-binaries (`resources/apolite.rc.in`). Bump the header and the `project()` line
-together; `testVersionConsistency` also guards the string against the macros.
+does not match, and generates a `VERSIONINFO` resource from it for the three
+Windows binaries (`resources/apolite.rc.in`). Bump the header and the `project()`
+line together; `testVersionConsistency` also guards the string against the macros.
 
 1. Bump `APOLITE_VERSION_PATCH`/`_STRING` in `include/apolite/apolite.h` and the
    `project(ApoLite VERSION ...)` line in `CMakeLists.txt`.
