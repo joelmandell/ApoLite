@@ -69,8 +69,6 @@ private:
         FilterChain chain;
         std::vector<std::vector<Sample>> buffersA;
         std::vector<std::vector<Sample>> buffersB;
-        std::vector<std::vector<Sample>> interleave;  // deinterleave staging
-        std::vector<Sample*> interleavePtrs;
         std::vector<Sample*> chainInPtrs;
         std::vector<Sample*> chainOutPtrs;
         size_t frames = 0;
@@ -95,6 +93,7 @@ private:
         std::atomic<uint64_t>* seq_;
     };
 
+    void runChain(PreparedChain* pc, size_t frames);
     void processPlanarWith(PreparedChain* pc, const float* const* in, float* const* out,
                            size_t frames);
     // Caller must hold publishMutex_.

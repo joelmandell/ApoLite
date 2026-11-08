@@ -128,11 +128,22 @@ void FirConvolver::transformBlock(bool commit) {
     fdlPos_ = nextPos;
 
     std::fill(acc_.begin(), acc_.end(), cplx(0.0, 0.0));
+    // Accumulate as plain real arithmetic over interleaved [re, im] pairs.
+    // std::complex's operator* carries NaN and signed-zero handling that stops
+    // the compiler vectorizing the loop; this form vectorizes and is the same
+    // complex product. The standard guarantees a complex<double> array is
+    // layout-compatible with an array of two doubles.
+    double* acc = reinterpret_cast<double*>(acc_.data());
     size_t idx = fdlPos_;
     for (size_t p = 0; p < partitions_; ++p) {
-        const auto& x = fdl_[idx];
-        const auto& hh = h_[p];
-        for (size_t k = 0; k < bins_; ++k) acc_[k] += x[k] * hh[k];
+        const double* x = reinterpret_cast<const double*>(fdl_[idx].data());
+        const double* hh = reinterpret_cast<const double*>(h_[p].data());
+        for (size_t k = 0; k < bins_; ++k) {
+            const double xr = x[2 * k], xi = x[2 * k + 1];
+            const double hr = hh[2 * k], hi = hh[2 * k + 1];
+            acc[2 * k] += xr * hr - xi * hi;
+            acc[2 * k + 1] += xr * hi + xi * hr;
+        }
         idx = (idx + 1) % partitions_;
     }
 

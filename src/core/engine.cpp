@@ -97,10 +97,6 @@ size_t Engine::loadConfiguration(const std::string& path) {
                                                   layout_.count()));
     prepared->buffersA.assign(channelCount, std::vector<Sample>(prepared->frames, 0.0f));
     prepared->buffersB.assign(channelCount, std::vector<Sample>(prepared->frames, 0.0f));
-    const size_t staging = std::max(prepared->inputChannels, prepared->outputChannels);
-    prepared->interleave.assign(std::max<size_t>(staging, 1),
-                                std::vector<Sample>(prepared->frames, 0.0f));
-    prepared->interleavePtrs.assign(prepared->interleave.size(), nullptr);
     prepared->chainInPtrs.assign(channelCount, nullptr);
     prepared->chainOutPtrs.assign(channelCount, nullptr);
 
@@ -120,6 +116,51 @@ size_t Engine::loadConfiguration(const std::string& path) {
         log_("Loaded " + std::to_string(prepared->chain.entries.size()) + " filters from " + path);
     }
     return prepared->chain.entries.size();
+}
+
+void Engine::runChain(PreparedChain* pc, size_t n) {
+    const size_t channelCount = pc->buffersA.size();
+
+    for (ChainEntry& entry : pc->chain.entries) {
+        if (!entry.filter || entry.inChannels.empty()) continue;
+        const size_t nIn = entry.inChannels.size();
+        const size_t nOut = entry.outChannels.size();
+
+        Sample** inPtrs = pc->chainInPtrs.data();
+        Sample** outPtrs = pc->chainOutPtrs.data();
+        for (size_t i = 0; i < nIn; ++i) inPtrs[i] = pc->buffersA[entry.inChannels[i]].data();
+        for (size_t i = 0; i < nOut; ++i) {
+            const size_t ch = entry.outChannels[i];
+            outPtrs[i] = entry.filter->inPlace() ? pc->buffersA[ch].data()
+                                                 : pc->buffersB[ch].data();
+        }
+
+        entry.filter->process(const_cast<const Sample* const*>(inPtrs), outPtrs, n, nOut);
+
+        if (!entry.filter->inPlace()) {
+            for (size_t i = 0; i < nOut; ++i) {
+                const size_t ch = entry.outChannels[i];
+                std::swap(pc->buffersA[ch], pc->buffersB[ch]);
+            }
+        }
+    }
+
+    // The limiter is applied in place, so callers only have to move the result
+    // to the host buffer once.
+    const double limit = pc->limiter;
+    if (limit > 0.0) {
+        const float hi = static_cast<float>(limit);
+        const size_t channels = std::min(pc->outputChannels, channelCount);
+        for (size_t c = 0; c < channels; ++c) {
+            Sample* d = pc->buffersA[c].data();
+            for (size_t i = 0; i < n; ++i) {
+                float v = d[i];
+                if (v > hi) v = hi;
+                else if (v < -hi) v = -hi;
+                d[i] = v;
+            }
+        }
+    }
 }
 
 void Engine::processPlanarWith(PreparedChain* pc, const float* const* in, float* const* out,
@@ -147,52 +188,17 @@ void Engine::processPlanarWith(PreparedChain* pc, const float* const* in, float*
         if (inputChannels == 1 && channelCount >= 2)
             std::memcpy(pc->buffersA[1].data(), pc->buffersA[0].data(), n * sizeof(Sample));
 
-        for (ChainEntry& entry : pc->chain.entries) {
-            if (!entry.filter || entry.inChannels.empty()) continue;
-            const size_t nIn = entry.inChannels.size();
-            const size_t nOut = entry.outChannels.size();
+        runChain(pc, n);
 
-            Sample** inPtrs = pc->chainInPtrs.data();
-            Sample** outPtrs = pc->chainOutPtrs.data();
-            for (size_t i = 0; i < nIn; ++i) inPtrs[i] = pc->buffersA[entry.inChannels[i]].data();
-            for (size_t i = 0; i < nOut; ++i) {
-                const size_t ch = entry.outChannels[i];
-                outPtrs[i] = entry.filter->inPlace() ? pc->buffersA[ch].data()
-                                                     : pc->buffersB[ch].data();
-            }
-
-            entry.filter->process(const_cast<const Sample* const*>(inPtrs), outPtrs, n, nOut);
-
-            if (!entry.filter->inPlace()) {
-                for (size_t i = 0; i < nOut; ++i) {
-                    const size_t ch = entry.outChannels[i];
-                    std::swap(pc->buffersA[ch], pc->buffersB[ch]);
-                }
-            }
-        }
-
-        const double limit = pc->limiter;
         for (size_t c = 0; c < outputChannels; ++c) {
             if (c >= channelCount) {
                 std::memset(out[c] + done, 0, n * sizeof(float));
                 continue;
             }
-            const Sample* src = pc->buffersA[c].data();
-            if (limit > 0.0) {
-                const float hi = static_cast<float>(limit);
-                for (size_t i = 0; i < n; ++i) {
-                    float v = src[i];
-                    if (v > hi) v = hi;
-                    else if (v < -hi) v = -hi;
-                    out[c][done + i] = v;
-                }
-            } else {
-                std::memcpy(out[c] + done, src, n * sizeof(float));
-            }
+            std::memcpy(out[c] + done, pc->buffersA[c].data(), n * sizeof(float));
         }
         done += n;
     }
-
 }
 
 void Engine::processPlanar(const float* const* in, float* const* out, size_t frames) {
@@ -217,25 +223,34 @@ void Engine::processInterleaved(float* buffer, size_t frames) {
     if (pc == nullptr || frames == 0) return;
 
     const size_t channels = pc->outputChannels;
-    if (channels == 0) return;
-    // The staging buffers are sized for the published chain, so a host block
-    // larger than that is chunked. Nothing is allocated here.
+    const size_t channelCount = pc->buffersA.size();
+    if (channels == 0 || channelCount == 0) return;
+
+    // Deinterleave straight into the published buffers, run the chain in place
+    // and interleave back. The staging buffers are not needed, so an interleaved
+    // block costs one deinterleave and one interleave pass, not three.
     size_t done = 0;
     while (done < frames) {
         const size_t n = std::min(pc->frames, frames - done);
         float* chunk = buffer + done * channels;
 
         for (size_t c = 0; c < channels; ++c) {
-            Sample* dst = pc->interleave[c].data();
+            Sample* dst = c < channelCount ? pc->buffersA[c].data() : nullptr;
+            if (dst == nullptr) continue;
             for (size_t i = 0; i < n; ++i) dst[i] = chunk[i * channels + c];
-            pc->interleavePtrs[c] = dst;
         }
+        // Channels the buffer does not carry must be silent, not stale.
+        for (size_t c = channels; c < channelCount; ++c)
+            std::memset(pc->buffersA[c].data(), 0, n * sizeof(Sample));
 
-        processPlanarWith(pc, const_cast<const float* const*>(pc->interleavePtrs.data()),
-                          pc->interleavePtrs.data(), n);
+        runChain(pc, n);
 
         for (size_t c = 0; c < channels; ++c) {
-            const Sample* src = pc->interleave[c].data();
+            if (c >= channelCount) {
+                for (size_t i = 0; i < n; ++i) chunk[i * channels + c] = 0.0f;
+                continue;
+            }
+            const Sample* src = pc->buffersA[c].data();
             for (size_t i = 0; i < n; ++i) chunk[i * channels + c] = src[i];
         }
         done += n;
