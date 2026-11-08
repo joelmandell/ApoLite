@@ -521,6 +521,64 @@ void testEngineCompressor() {
     check(quiet.back() > 0.002f * 1.5f, "compressor raises quiet speech via makeup gain");
 }
 
+// The gain is computed as exp2(x * -log2(10)/20) rather than pow(10, -x/20).
+// The two are the same function; this pins the approximation to the reference
+// so a future change cannot drift the level by more than a float ulp or two.
+void testCompressorGainMatchesPow() {
+    const double thresholdDb = -20.0, ratio = 4.0, attackMs = 5.0, releaseMs = 120.0;
+    const double makeupDb = 6.0, kneeDb = 6.0, limitDb = -3.0;
+
+    apolite::CompressorFilter comp(thresholdDb, ratio, attackMs, releaseMs, makeupDb, kneeDb,
+                                   limitDb);
+    comp.prepare(48000.0, 480, 1);
+
+    // A signal that sweeps from below the threshold, through the knee, and well
+    // above it, so all three branches of the gain computation are exercised.
+    const size_t n = 96000;
+    std::vector<float> in(n);
+    for (size_t i = 0; i < n; ++i) {
+        const double t = static_cast<double>(i) / 48000.0;
+        const double amp = std::pow(10.0, (-60.0 + 50.0 * (t / 2.0)) / 20.0);
+        in[i] = static_cast<float>(amp * std::sin(2.0 * apolite::kPi * 1000.0 * t));
+    }
+    std::vector<float> out(n, 0.0f);
+    const apolite::Sample* cin[1] = {in.data()};
+    apolite::Sample* coutp[1] = {out.data()};
+    comp.process(cin, coutp, n, 1);
+
+    // Reference implementation using pow and log10, matching the previous code.
+    const float threshold = static_cast<float>(thresholdDb);
+    const float slope = static_cast<float>(1.0 - 1.0 / ratio);
+    const float attack = static_cast<float>(std::exp(-1.0 / (48000.0 * attackMs / 1000.0)));
+    const float release = static_cast<float>(std::exp(-1.0 / (48000.0 * releaseMs / 1000.0)));
+    const float makeup = static_cast<float>(std::pow(10.0, makeupDb / 20.0));
+    const float limit = static_cast<float>(std::pow(10.0, limitDb / 20.0));
+    const float halfKnee = static_cast<float>(kneeDb * 0.5);
+
+    double maxAbs = 0.0;
+    float env = 0.0f;
+    for (size_t i = 0; i < n; ++i) {
+        const float x = in[i];
+        const float level = std::fabs(x);
+        const float coeff = level > env ? attack : release;
+        env = coeff * env + (1.0f - coeff) * level;
+        const float levelDb = 20.0f * std::log10(env + 1e-9f);
+        float reductionDb = 0.0f;
+        const float over = levelDb - threshold;
+        if (over > halfKnee) {
+            reductionDb = slope * over;
+        } else if (over > -halfKnee && kneeDb > 0.0) {
+            const float t = over + halfKnee;
+            reductionDb = slope * (t * t) / (2.0f * static_cast<float>(kneeDb));
+        }
+        float gain = std::pow(10.0f, -reductionDb / 20.0f) * makeup;
+        const float peak = std::fabs(x) * gain;
+        if (peak > limit) gain *= limit / peak;
+        maxAbs = std::max(maxAbs, std::fabs(static_cast<double>(out[i]) - x * gain));
+    }
+    checkNear(maxAbs, 0.0, 1e-6, "exp2 gain matches the pow reference");
+}
+
 void testSettingsRoundTrip() {
     // The defaults must render to text the parser accepts, and survive a round
     // trip without losing any value the editor can express.
@@ -886,6 +944,7 @@ int main() {
     testEngineDevice();
     testEngineIir();
     testEngineCompressor();
+    testCompressorGainMatchesPow();
     testEngineReloadWhileProcessing();
     testEngineLargeHostBlock();
     testEngineStage();
