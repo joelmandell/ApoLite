@@ -127,6 +127,12 @@ Convolution: room.wav
 Convolves with an impulse response. Relative paths resolve against the directory
 of the including config file.
 
+The impulse response may be at most 262144 taps (about 5.5 seconds at 48 kHz).
+A longer file is rejected with a message in the log and the rest of the chain
+still loads; the limit exists so a mistaken or hostile file cannot exhaust
+memory. When one impulse applies to several channels it is expanded into spectra
+once and shared, so a stereo impulse does not cost twice a mono one.
+
 ## Delay
 
 ```ini

@@ -5,10 +5,36 @@
 #include <algorithm>
 #include <cmath>
 #include <functional>
+#include <stdexcept>
 
 #include "apolite/mathutil.h"
 
 namespace apolite {
+
+namespace {
+
+// Blocks per impulse, rounded up, and never zero so a kernel always has at
+// least one partition to accumulate.
+size_t partitionsFor(size_t taps, size_t block) {
+    const size_t p = (taps + block - 1) / block;
+    return p == 0 ? 1 : p;
+}
+
+}  // namespace
+
+size_t firMemoryBytes(size_t taps, size_t channels, size_t blockSize) {
+    const size_t block = blockSize ? blockSize : 1;
+    const size_t fftSize = block * 2;
+    const size_t bins = fftSize / 2 + 1;
+    const size_t partitions = partitionsFor(taps, block);
+
+    // Shared kernel: the impulse spectra, held once.
+    const size_t kernel = partitions * bins * sizeof(cplx);
+    // Per channel: the delay line, which is the same size as the kernel.
+    const size_t perChannel = partitions * bins * sizeof(cplx) +
+                              (2 * block + 3 * block) * sizeof(double) + 4 * bins * sizeof(cplx);
+    return kernel + channels * perChannel;
+}
 
 std::vector<double> designMinimumPhaseFir(size_t length, double sampleRate,
                                           const std::function<double(double)>& magAt) {
@@ -58,23 +84,18 @@ std::vector<double> designMinimumPhaseFir(size_t length, double sampleRate,
     return out;
 }
 
-FirConvolver::FirConvolver(std::vector<double> taps, size_t blockSize)
+FirKernel::FirKernel(std::vector<double> taps, size_t blockSize)
     : block_(blockSize ? blockSize : 1),
       fftSize_(block_ * 2),
+      bins_(block_ + 1),
       taps_(taps.size()),
-      fft_(block_ * 2),
-      inBuf_(blockSize ? blockSize : 1, 0.0),
-      outBuf_(blockSize ? blockSize : 1, 0.0),
-      prev_(blockSize ? blockSize : 1, 0.0),
-      timeBuf_(block_ * 2, 0.0),
-      freqBuf_(bins_, cplx(0.0, 0.0)),
-      acc_(bins_, cplx(0.0, 0.0)) {
-    bins_ = fft_.bins();
-    freqBuf_.assign(bins_, cplx(0.0, 0.0));
-    acc_.assign(bins_, cplx(0.0, 0.0));
+      fft_(block_ * 2) {
+    if (taps_ > kMaxImpulseTaps) {
+        throw std::length_error("impulse response is longer than the " +
+                                std::to_string(kMaxImpulseTaps) + "-tap limit");
+    }
 
-    partitions_ = (taps_ + block_ - 1) / block_;
-    if (partitions_ == 0) partitions_ = 1;
+    partitions_ = partitionsFor(taps_, block_);
 
     h_.assign(partitions_, std::vector<cplx>(bins_, cplx(0.0, 0.0)));
     std::vector<double> padded(fftSize_, 0.0);
@@ -86,7 +107,25 @@ FirConvolver::FirConvolver(std::vector<double> taps, size_t blockSize)
         }
         fft_.forward(padded.data(), h_[p].data());
     }
+}
 
+FirConvolver::FirConvolver(std::vector<double> taps, size_t blockSize)
+    : FirConvolver(std::make_shared<FirKernel>(std::move(taps), blockSize)) {}
+
+FirConvolver::FirConvolver(std::shared_ptr<const FirKernel> kernel)
+    : kernel_(std::move(kernel)),
+      block_(kernel_->blockSize()),
+      fftSize_(block_ * 2),
+      bins_(kernel_->bins()),
+      taps_(kernel_->tapCount()),
+      partitions_(kernel_->partitions()),
+      fft_(block_ * 2),
+      inBuf_(block_, 0.0),
+      outBuf_(block_, 0.0),
+      prev_(block_, 0.0),
+      timeBuf_(block_ * 2, 0.0),
+      freqBuf_(bins_, cplx(0.0, 0.0)),
+      acc_(bins_, cplx(0.0, 0.0)) {
     fdl_.assign(partitions_, std::vector<cplx>(bins_, cplx(0.0, 0.0)));
     savedFdlEntry_.assign(bins_, cplx(0.0, 0.0));
     fdlPos_ = 0;
@@ -132,12 +171,13 @@ void FirConvolver::transformBlock(bool commit) {
     // std::complex's operator* carries NaN and signed-zero handling that stops
     // the compiler vectorizing the loop; this form vectorizes and is the same
     // complex product. The standard guarantees a complex<double> array is
-    // layout-compatible with an array of two doubles.
+    // layout-compatible with an array of two doubles. The kernel spectra are
+    // shared, so this reads the same h_ for every channel.
     double* acc = reinterpret_cast<double*>(acc_.data());
     size_t idx = fdlPos_;
     for (size_t p = 0; p < partitions_; ++p) {
         const double* x = reinterpret_cast<const double*>(fdl_[idx].data());
-        const double* hh = reinterpret_cast<const double*>(h_[p].data());
+        const double* hh = reinterpret_cast<const double*>(kernel_->spectrum(p));
         for (size_t k = 0; k < bins_; ++k) {
             const double xr = x[2 * k], xi = x[2 * k + 1];
             const double hr = hh[2 * k], hi = hh[2 * k + 1];

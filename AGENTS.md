@@ -63,6 +63,16 @@ Windows targets on MSVC. Do not add Windows headers to `src/core`.
 * **Allocation-free audio path.** All buffers are built at configure time. Do not
   allocate inside `process`/`APOProcess`. `FirConvolver` keeps scratch buffers
   (`savedFdlEntry_`) sized in the constructor for exactly this reason.
+* **Share one kernel per impulse, and cap its length.** A `FirKernel` holds the
+  impulse spectra and is immutable once built; every channel that convolves with
+  the same impulse shares one `FirKernel` through a `shared_ptr`. Do not go back
+  to constructing a `FirConvolver` from taps per channel: that multiplies the
+  spectra (roughly eight times the impulse length) by the channel count. The
+  impulse is also capped at `kMaxImpulseTaps` (262144 taps). `FirKernel` throws
+  `std::length_error` past the cap, the config loader rejects the file first with
+  a named message, and `Engine::loadConfiguration` drops a filter whose `prepare`
+  throws rather than letting the exception escape, because reloads happen on the
+  watcher thread where an uncaught exception terminates the process.
 * **Any block size.** The host may ask for any number of frames. 480 (10 ms at
   48 kHz) is the normal Windows case and is not a multiple of the 256-frame
   convolver block. Tests must cover a non-multiple block size; a suite that only

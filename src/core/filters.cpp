@@ -166,7 +166,8 @@ void CopyFilter::process(const Sample* const* in, Sample* const* out, size_t fra
 }
 
 GraphicEqFilter::GraphicEqFilter(std::vector<EqNode> nodes, size_t filterLength)
-    : nodes_(std::move(nodes)), filterLength_(filterLength) {}
+    : nodes_(std::move(nodes)),
+      filterLength_(filterLength == 0 ? 16384 : std::min(filterLength, kMaxImpulseTaps)) {}
 
 void GraphicEqFilter::prepare(double sampleRate, size_t maxFrames, size_t channels) {
     (void)maxFrames;
@@ -175,9 +176,12 @@ void GraphicEqFilter::prepare(double sampleRate, size_t maxFrames, size_t channe
         return std::pow(10.0, interp.gainAt(f) / 20.0);
     });
 
+    // One kernel for every channel: the impulse is the same, so the spectra are
+    // computed and stored once instead of once per channel.
+    auto kernel = std::make_shared<FirKernel>(std::move(taps), kConvolverBlock);
     convolvers_.clear();
     for (size_t i = 0; i < channels; ++i)
-        convolvers_.push_back(std::make_unique<FirConvolver>(taps, kConvolverBlock));
+        convolvers_.push_back(std::make_unique<FirConvolver>(kernel));
 
     scratchIn_.assign(kConvolverBlock, 0.0);
     scratchOut_.assign(kConvolverBlock, 0.0);
@@ -204,10 +208,21 @@ void GraphicEqFilter::process(const Sample* const* in, Sample* const* out, size_
 void ConvolutionFilter::prepare(double sampleRate, size_t maxFrames, size_t channels) {
     (void)sampleRate;
     (void)maxFrames;
+    const size_t distinct = tapsPerChannel_.size();
+
+    // Build one kernel per distinct impulse and share it across the channels
+    // that use it, so a mono impulse applied to every channel is not expanded
+    // into one copy per channel. No impulses means no convolvers, which matches
+    // a filter that was constructed with nothing to apply.
+    std::vector<std::shared_ptr<const FirKernel>> kernels(distinct);
     convolvers_.clear();
+    if (distinct == 0) return;
+
     for (size_t i = 0; i < channels; ++i) {
-        const auto& taps = tapsPerChannel_[tapsPerChannel_.size() == 1 ? 0 : i % tapsPerChannel_.size()];
-        convolvers_.push_back(std::make_unique<FirConvolver>(taps, kConvolverBlock));
+        const size_t k = distinct == 1 ? 0 : i % distinct;
+        if (!kernels[k])
+            kernels[k] = std::make_shared<FirKernel>(tapsPerChannel_[k], kConvolverBlock);
+        convolvers_.push_back(std::make_unique<FirConvolver>(kernels[k]));
     }
     scratchIn_.assign(kConvolverBlock, 0.0);
     scratchOut_.assign(kConvolverBlock, 0.0);
@@ -219,6 +234,10 @@ void ConvolutionFilter::reset() {
 
 void ConvolutionFilter::process(const Sample* const* in, Sample* const* out, size_t frames,
                                 size_t channels) {
+    // No impulses to apply: the filter is an identity, and inPlace() is true, so
+    // the input buffers already hold the correct output.
+    if (convolvers_.empty()) return;
+
     size_t done = 0;
     while (done < frames) {
         const size_t n = std::min(kConvolverBlock, frames - done);
