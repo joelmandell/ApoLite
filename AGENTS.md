@@ -96,9 +96,23 @@ line together; `testVersionConsistency` also guards the string against the macro
 3. Download the `ApoLite-windows` artifact from that run and package it - do not
    ship locally built binaries.
 4. `gh release create` with `ApoLite-<ver>-win11-x64.zip` and `SHA256SUMS.txt`,
-   built from the CI artifacts plus `LICENSE` and `config/voice-mic.txt`.
+   built from the CI artifacts plus `LICENSE`, `config/voice-mic.txt` and a
+   `README.txt` written for the release. The zip is flat: the three binaries at
+   the top level, then `config/`, `LICENSE`, `README.txt`. Give every member a
+   fixed timestamp and mode so the zip is reproducible.
 
 `gh` needs `GH_TOKEN` set from `GITHUB_TOKEN` in this environment.
+
+The release tag is annotated and points at the merge commit on `main`, not at a
+local commit, so `git ls-remote --tags` and the release agree. Confirm the
+peel with `gh api repos/<owner>/<repo>/commits/v<ver> --jq .sha`.
+
+Check the packaged binaries really are the version they claim: the version
+string is UTF-16 in the `VERSIONINFO` resource, so a plain ASCII grep for
+`1.0.5` misses it. Search for `'1.0.5'.encode('utf-16-le')` instead.
+
+The PR that is released must be marked ready first; the merge API refuses a
+draft with `Pull request is in draft`. Use `gh pr ready <n>` before merging.
 
 Note: `APO_REG_PROPERTIES` carries only major/minor, so the patch digit is not
 visible in the APO properties. It reaches the user through the VERSIONINFO
