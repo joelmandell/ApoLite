@@ -797,6 +797,21 @@ void ConfigLoader::addConvolution(const std::string& value, const std::string& p
         if (log_) log_("Cannot load impulse response: " + resolved);
         return;
     }
+
+    // Reject a file longer than the convolver accepts, before it is expanded
+    // into spectra. The convolver would refuse it anyway; doing it here lets the
+    // message name the file and the actual length.
+    size_t longest = 0;
+    for (const auto& t : taps) longest = std::max(longest, t.size());
+    if (longest > kMaxImpulseTaps) {
+        if (log_) {
+            log_("Impulse response is too long: " + resolved + " has " +
+                 std::to_string(longest) + " taps, the limit is " +
+                 std::to_string(kMaxImpulseTaps));
+        }
+        return;
+    }
+
     addToCurrent(std::make_shared<ConvolutionFilter>(std::move(taps)));
 }
 

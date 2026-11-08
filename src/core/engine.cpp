@@ -101,7 +101,17 @@ size_t Engine::loadConfiguration(const std::string& path) {
     prepared->chainOutPtrs.assign(channelCount, nullptr);
 
     for (ChainEntry& entry : prepared->chain.entries) {
-        if (entry.filter) entry.filter->prepare(sampleRate_, prepared->frames, entry.inChannels.size());
+        if (!entry.filter) continue;
+        // A filter can refuse to prepare (an impulse longer than the convolver
+        // cap, for instance). Dropping just that filter keeps the rest of the
+        // chain working; letting it escape would terminate the process when the
+        // file watcher reloads the configuration on its own thread.
+        try {
+            entry.filter->prepare(sampleRate_, prepared->frames, entry.inChannels.size());
+        } catch (const std::exception& e) {
+            if (log_) log_("Dropped a filter: " + std::string(e.what()));
+            entry.filter.reset();
+        }
     }
 
     {

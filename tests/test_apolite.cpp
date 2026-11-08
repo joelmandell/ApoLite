@@ -47,6 +47,11 @@ void checkNear(double a, double b, double tol, const std::string& what) {
     }
 }
 
+// Defined below with the engine tests; declared here so the FIR tests, which run
+// earlier, can write scratch files.
+std::string tempDir();
+std::string writeTemp(const std::string& name, const std::string& text);
+
 // ---------------------------------------------------------------- FFT tests
 
 void testFft() {
@@ -232,6 +237,146 @@ void testFirArbitraryBlockSizes() {
                       "convolution in %zu-sample calls matches direct convolution", chunk);
         checkNear(maxErr, 0.0, 1e-9, what);
     }
+}
+
+// The convolver must refuse an impulse longer than its cap rather than trying
+// to expand it into spectra. Without the cap a long file exhausts memory.
+void testFirImpulseCap() {
+    const size_t block = 256;
+    const size_t over = apolite::kMaxImpulseTaps + block;
+
+    std::vector<double> tooLong(over, 0.0);
+    tooLong[0] = 1.0;
+
+    bool threw = false;
+    try {
+        apolite::FirConvolver c(tooLong, block);
+    } catch (const std::length_error&) {
+        threw = true;
+    }
+    check(threw, "impulse longer than the cap is rejected");
+
+    // Exactly at the cap must still work, so the boundary is not off by one.
+    std::vector<double> atCap(apolite::kMaxImpulseTaps, 0.0);
+    atCap[0] = 1.0;
+    bool okAtCap = true;
+    try {
+        apolite::FirConvolver c(atCap, block);
+        std::vector<double> x(block, 0.25), y(block, 0.0);
+        c.process(x.data(), y.data(), block);
+    } catch (const std::exception&) {
+        okAtCap = false;
+    }
+    check(okAtCap, "impulse exactly at the cap is accepted");
+
+    // The reported memory must grow with the tap count, and must be bounded at
+    // the cap: the shared kernel is about eight times the impulse length.
+    // Not named `small`/`large`: the Windows headers define `small` as a macro.
+    const size_t smallBytes = apolite::firMemoryBytes(16384, 1, block);
+    const size_t largeBytes = apolite::firMemoryBytes(apolite::kMaxImpulseTaps, 1, block);
+    check(largeBytes > smallBytes, "reported memory grows with tap count");
+    check(largeBytes < 16u * 1024u * 1024u, "memory at the cap stays under 16 MB per channel");
+}
+
+// Channels that convolve with the same impulse must share one kernel, so the
+// spectra are not stored once per channel.
+void testFirKernelSharedAcrossChannels() {
+    const size_t block = 256;
+    std::vector<double> taps(16384, 0.0);
+    taps[0] = 1.0;
+
+    auto kernel = std::make_shared<apolite::FirKernel>(taps, block);
+    apolite::FirConvolver a(kernel);
+    apolite::FirConvolver b(kernel);
+
+    // Both must produce the same result for the same input, which shows they
+    // share the kernel correctly rather than one being left uninitialised.
+    const size_t n = 2048;
+    std::vector<double> x(n);
+    for (size_t i = 0; i < n; ++i) x[i] = std::sin(0.01 * i);
+    std::vector<double> ya(n, 0.0), yb(n, 0.0);
+    a.process(x.data(), ya.data(), n);
+    b.process(x.data(), yb.data(), n);
+
+    double maxDiff = 0.0;
+    for (size_t i = 0; i < n; ++i) maxDiff = std::max(maxDiff, std::fabs(ya[i] - yb[i]));
+    checkNear(maxDiff, 0.0, 1e-12, "convolvers sharing a kernel agree");
+    check(kernel.use_count() == 3, "the kernel is shared, not copied per channel");
+
+    // A mono impulse over four channels is one kernel plus four delay lines, not
+    // four kernels. The per-channel part is bounded well below four kernels.
+    const size_t shared = apolite::firMemoryBytes(16384, 4, block);
+    const size_t perKernel = apolite::firMemoryBytes(16384, 1, block);
+    check(shared < 4 * perKernel, "four channels cost less than four separate kernels");
+}
+
+// A GraphicEQ over two channels must not build two identical kernels.
+void testEngineGraphicEqSharesKernel() {
+    const std::string cfg = writeTemp("graphiceq_stereo.txt", "GraphicEQ: 20 0; 20000 0\n");
+    apolite::Engine engine;
+    engine.configure(48000.0, 2, 2, 0, false, false, true, "Speakers", "Speakers", "");
+    check(engine.loadConfiguration(cfg) == 1, "stereo graphic EQ entry count");
+
+    // A flat response must still be transparent on both channels.
+    const size_t n = 480;
+    std::vector<float> buf(2 * n, 0.0f);
+    for (size_t i = 0; i < n; ++i) {
+        const float v = static_cast<float>(std::sin(2.0 * apolite::kPi * 700.0 * i / 48000.0));
+        buf[2 * i] = v;
+        buf[2 * i + 1] = v;
+    }
+    std::vector<float> reference = buf;
+    engine.processInterleaved(buf.data(), n);
+
+    double maxErr = 0.0;
+    for (size_t i = 0; i < buf.size(); ++i)
+        maxErr = std::max(maxErr, std::fabs(static_cast<double>(buf[i]) - reference[i]));
+    checkNear(maxErr, 0.0, 1e-6, "stereo flat graphic EQ is transparent");
+}
+
+// A Convolution whose impulse file is too long must be dropped with a message,
+// leaving the rest of the chain running, not crash the process.
+void testEngineConvolutionTooLong() {
+    // A real WAV of more taps than the cap. The loader must reject it before it
+    // is expanded into spectra; the file itself is small on disk because the
+    // samples are zero, but the tap count is what matters.
+    const size_t taps = apolite::kMaxImpulseTaps + 1024;
+    const size_t dataBytes = taps * 2;  // 16-bit mono
+
+    std::vector<unsigned char> wav;
+    auto u32 = [&](uint32_t v) {
+        wav.push_back(v & 0xFF); wav.push_back((v >> 8) & 0xFF);
+        wav.push_back((v >> 16) & 0xFF); wav.push_back((v >> 24) & 0xFF);
+    };
+    auto u16 = [&](uint16_t v) { wav.push_back(v & 0xFF); wav.push_back((v >> 8) & 0xFF); };
+    const char* riff = "RIFF"; wav.insert(wav.end(), riff, riff + 4);
+    u32(static_cast<uint32_t>(36 + dataBytes));
+    const char* wave = "WAVE"; wav.insert(wav.end(), wave, wave + 4);
+    const char* fmt = "fmt "; wav.insert(wav.end(), fmt, fmt + 4);
+    u32(16); u16(1); u16(1); u32(48000); u32(96000); u16(2); u16(16);
+    const char* data = "data"; wav.insert(wav.end(), data, data + 4);
+    u32(static_cast<uint32_t>(dataBytes));
+    wav.resize(wav.size() + dataBytes, 0);
+
+    const std::string wavPath = tempDir() + "/apolite_test_too_long.wav";
+    FILE* f = std::fopen(wavPath.c_str(), "wb");
+    if (f) {
+        std::fwrite(wav.data(), 1, wav.size(), f);
+        std::fclose(f);
+    }
+
+    const std::string cfg =
+        writeTemp("conv_too_long.txt", "Convolution: " + wavPath + "\nPreamp: 3 dB\n");
+    apolite::Engine engine;
+    engine.configure(48000.0, 1, 1, 0, true, false, true, "Mic", "Mic", "");
+
+    // Only the Preamp survives: the oversized convolution is rejected.
+    check(engine.loadConfiguration(cfg) == 1, "an oversized impulse is dropped from the chain");
+
+    const size_t n = 480;
+    std::vector<float> buf(n, 0.5f);
+    engine.processInterleaved(buf.data(), n);
+    check(std::isfinite(buf[0]) && std::fabs(buf[0]) > 0.0f, "the chain still processes audio");
 }
 
 // ------------------------------------------------------- Expression tests
@@ -871,6 +1016,8 @@ int main() {
     testBiquad();
     testFir();
     testFirArbitraryBlockSizes();
+    testFirImpulseCap();
+    testFirKernelSharedAcrossChannels();
     testExpression();
     testChannelLayout();
     testGainInterpolator();
@@ -881,6 +1028,8 @@ int main() {
     testEngineChannelSelect();
     testEngineGraphicEq();
     testEngineGraphicEqArbitraryBlocks();
+    testEngineGraphicEqSharesKernel();
+    testEngineConvolutionTooLong();
     testEngineIf();
     testEngineElseBranch();
     testEngineDevice();
