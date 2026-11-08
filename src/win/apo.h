@@ -74,6 +74,10 @@ private:
     void startWatcher();
     void stopWatcher();
     std::wstring configPath() const;
+    std::wstring logPath() const;
+    // Write one line to the log file, so a dropped filter is visible without a
+    // debugger attached. Also sent to the debugger when one is present.
+    void logMessage(const std::string& message);
 
     std::atomic<ULONG> refCount_{1};
 

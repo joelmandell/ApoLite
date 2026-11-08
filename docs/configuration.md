@@ -127,11 +127,26 @@ Convolution: room.wav
 Convolves with an impulse response. Relative paths resolve against the directory
 of the including config file.
 
-The impulse response may be at most 262144 taps (about 5.5 seconds at 48 kHz).
-A longer file is rejected with a message in the log and the rest of the chain
-still loads; the limit exists so a mistaken or hostile file cannot exhaust
-memory. When one impulse applies to several channels it is expanded into spectra
-once and shared, so a stereo impulse does not cost twice a mono one.
+An impulse response is bounded by memory, not by a fixed tap count. A file is
+measured from its header before any of its samples are read, and refused when it
+would need more than the budget; the rest of the chain still loads, and the log
+names the file, its length, and the memory it would have taken. The default
+budget is 256 MB, which is far above any real response (a one-second stereo
+response is about 3 MB).
+
+The cost grows with the channel count, because the delay line is per channel and
+a stereo file holds one spectrum per channel. A mono impulse applied to several
+channels is expanded once and shared, so it does not cost twice a stereo one.
+
+```ini
+ImpulseBudgetMB: 512
+```
+
+Raises the budget for the configuration file it appears in. Use it for a
+deliberate long impulse, such as a measured room correction. Memory is the only
+thing the budget bounds; a very long impulse also costs CPU on the audio thread,
+so a response that fits the budget is still reported in the log when it is
+expensive (about 25% of a core or more) even though it is accepted.
 
 ## Delay
 

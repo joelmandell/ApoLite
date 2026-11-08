@@ -53,6 +53,9 @@ Design choices that follow from that:
 * Integer PCM and split buffers go through one reusable scratch buffer.
 * FIR work is partitioned (256-sample blocks) and primed, so convolution adds no
   latency to the conferencing round trip.
+* An impulse response is bounded by memory, measured from its WAV header before
+  any sample is read. A file over the budget is refused without being allocated,
+  so a mistaken or hostile file cannot exhaust the host process.
 
 Measured on the full voice preset at 48 kHz, mono, in 480-frame blocks:
 

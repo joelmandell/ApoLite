@@ -211,6 +211,19 @@ int cmdCheck(const Options& o) {
     configureEngine(engine, o);
     const size_t count = engine.loadConfiguration(o.config);
     std::printf("OK: %zu filters loaded for stage %s\n", count, o.stage.c_str());
+
+    // Re-load into a throwaway chain so a dropped filter is visible here rather
+    // than only in the APO's log. The engine's own log already printed above.
+    apolite::DeviceContext ctx;
+    ctx.sampleRate = o.rate;
+    ctx.channelCount = o.channels;
+    ctx.isCapture = o.stage == "capture";
+    ctx.isPreMix = o.stage == "pre-mix";
+    ctx.stageName = o.stage;
+    const apolite::ConfigCheck check = apolite::checkConfigurationFile(o.config, ctx);
+    if (check.hasDroppedFilter()) {
+        std::printf("WARNING: a filter was dropped; see the messages above\n");
+    }
     return 0;
 }
 

@@ -7,6 +7,7 @@
 #include <mmreg.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "apolite/apolite.h"
@@ -92,9 +93,7 @@ size_t apoInstanceCount() { return g_apoInstances.load(); }
 
 ApoLiteApo::ApoLiteApo() {
     g_apoInstances.fetch_add(1);
-    engine_.setLogSink([](const std::string& message) {
-        OutputDebugStringA(("ApoLite: " + message + "\n").c_str());
-    });
+    engine_.setLogSink([this](const std::string& message) { logMessage(message); });
 }
 
 ApoLiteApo::~ApoLiteApo() {
@@ -108,6 +107,67 @@ std::wstring ApoLiteApo::configPath() const {
     std::wstring base = (len > 0 && len < MAX_PATH) ? std::wstring(programData, len)
                                                     : std::wstring(L"C:\\ProgramData");
     return base + L"\\ApoLite\\config\\config.txt";
+}
+
+std::wstring ApoLiteApo::logPath() const {
+    const std::wstring path = configPath();
+    const size_t slash = path.find_last_of(L'\\');
+    const std::wstring dir = slash == std::wstring::npos ? path : path.substr(0, slash);
+    return dir + L"\\apolite.log";
+}
+
+// Write one line to `path`, rotating first if it has grown large. Returns false
+// when the file cannot be opened, which the caller may answer with another path.
+static bool writeLogLine(const std::wstring& path, const std::string& message) {
+    const bool fresh = GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES;
+
+    // Start over once the file is large, so a reload loop cannot grow it without
+    // bound. A few hundred kilobytes is far more history than a user needs.
+    constexpr ULONGLONG kMaxLogBytes = 256 * 1024;
+    if (!fresh) {
+        WIN32_FILE_ATTRIBUTE_DATA attr = {};
+        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &attr)) {
+            const ULONGLONG size =
+                (static_cast<ULONGLONG>(attr.nFileSizeHigh) << 32) | attr.nFileSizeLow;
+            if (size > kMaxLogBytes) DeleteFileW(path.c_str());
+        }
+    }
+
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+
+    if (fresh) {
+        const char* header = "ApoLite log. A filter that is dropped is reported here.\n";
+        DWORD wrote = 0;
+        WriteFile(file, header, static_cast<DWORD>(std::strlen(header)), &wrote, nullptr);
+    }
+
+    SYSTEMTIME now;
+    GetLocalTime(&now);
+    char stamp[32] = {};
+    std::snprintf(stamp, sizeof(stamp), "%04u-%02u-%02u %02u:%02u:%02u ", now.wYear, now.wMonth,
+                  now.wDay, now.wHour, now.wMinute, now.wSecond);
+    const std::string line = std::string(stamp) + message + "\n";
+    DWORD wrote = 0;
+    WriteFile(file, line.data(), static_cast<DWORD>(line.size()), &wrote, nullptr);
+    CloseHandle(file);
+    return true;
+}
+
+void ApoLiteApo::logMessage(const std::string& message) {
+    OutputDebugStringA(("ApoLite: " + message + "\n").c_str());
+
+    // A user without a debugger still needs to see why a filter was dropped, so
+    // the same line goes to a small file beside the configuration. The audio
+    // process runs as a service account and may not be allowed to write there,
+    // so fall back to the temp directory rather than dropping the line.
+    if (writeLogLine(logPath(), message)) return;
+
+    wchar_t temp[MAX_PATH] = {};
+    const DWORD n = GetTempPathW(MAX_PATH, temp);
+    if (n == 0 || n >= MAX_PATH) return;
+    writeLogLine(std::wstring(temp) + L"apolite.log", message);
 }
 
 // ------------------------------------------------------------------ IUnknown
@@ -436,9 +496,7 @@ STDMETHODIMP ApoLiteApo::GetEffectsList(LPGUID* ppEffectsIds, UINT* pcEffects, H
 void ApoLiteApo::loadConfiguration() {
     const std::wstring path = configPath();
     const std::string narrow = toNarrow(path.c_str());
-    engine_.setLogSink([](const std::string& message) {
-        OutputDebugStringA(("ApoLite: " + message + "\n").c_str());
-    });
+    engine_.setLogSink([this](const std::string& message) { logMessage(message); });
     engine_.loadConfiguration(narrow);
 }
 

@@ -266,6 +266,19 @@ void ConfigLoader::handleLine(const std::string& key, const std::string& value,
         addConvolution(v, path);
     } else if (key == "Compressor") {
         addCompressor(v);
+    } else if (key == "ImpulseBudgetMB") {
+        // Raise or lower the memory the impulse convolvers may hold. A command
+        // rather than a build-time constant so a user who really wants a long
+        // impulse response can have one without a different build.
+        const double mb = std::strtod(normalizeDecimal(trim(v)).c_str(), nullptr);
+        if (mb > 0.0) {
+            impulseBudgetBytes_ = static_cast<size_t>(mb * 1024.0 * 1024.0);
+            if (log_)
+                log_("Impulse memory budget set to " + std::to_string(static_cast<size_t>(mb)) +
+                     " MB");
+        } else if (log_) {
+            log_("Ignoring ImpulseBudgetMB with a non-positive value: " + v);
+        }
     } else if (key == "Eval") {
         handleEval(v);
     }
@@ -792,27 +805,88 @@ void ConfigLoader::addConvolution(const std::string& value, const std::string& p
     const std::string resolved =
         isAbsolutePath(target) ? target : joinPath(dirName(path), target);
 
-    std::vector<std::vector<double>> taps = loadWavImpulse(resolved);
+    // Read the header before the samples. The channel count is in it, and the
+    // budget depends on the channel count, so this is the first point at which
+    // the file can be judged. A file that does not fit is refused here, having
+    // read a few kilobytes instead of allocating it in full.
+    const WavImpulseInfo info = inspectWavImpulse(resolved);
+    if (!info.ok) {
+        if (log_) log_("Cannot load impulse response: " + resolved);
+        return;
+    }
+
+    // A mono impulse applied to every channel is expanded once and shared; a
+    // stereo file holds one spectrum per channel it names. The device channel
+    // count sets how many delay lines there are, the file's own channel count
+    // sets how many spectra. Budget against both.
+    const size_t channels = std::max<size_t>(1, currentChannels_.size());
+    const size_t distinct = std::max<size_t>(1, info.channels);
+    const size_t maxTaps = maxImpulseTapsForBudget(channels, impulseBudgetBytes_, 256, distinct);
+    if (info.frames > maxTaps) {
+        if (log_) {
+            log_("Impulse response is too long: " + resolved + " has " +
+                 std::to_string(info.frames) + " taps, which needs " +
+                 std::to_string(firMemoryBytes(info.frames, channels, 256, distinct) /
+                                (1024 * 1024)) +
+                 " MB for " + std::to_string(channels) + " channel(s); the budget is " +
+                 std::to_string(impulseBudgetBytes_ / (1024 * 1024)) + " MB (about " +
+                 std::to_string(maxTaps) + " taps). Raise it with ImpulseBudgetMB, or shorten " +
+                 "the file. At this length the convolution also costs about " +
+                 std::to_string(static_cast<int>(
+                     impulseRealtimePercent(info.frames, channels, ctx_.sampleRate))) +
+                 "% of a CPU core.");
+        }
+        return;
+    }
+
+    std::vector<std::vector<double>> taps = loadWavImpulse(resolved, maxTaps);
     if (taps.empty()) {
         if (log_) log_("Cannot load impulse response: " + resolved);
         return;
     }
 
-    // Reject a file longer than the convolver accepts, before it is expanded
-    // into spectra. The convolver would refuse it anyway; doing it here lets the
-    // message name the file and the actual length.
-    size_t longest = 0;
-    for (const auto& t : taps) longest = std::max(longest, t.size());
-    if (longest > kMaxImpulseTaps) {
-        if (log_) {
-            log_("Impulse response is too long: " + resolved + " has " +
-                 std::to_string(longest) + " taps, the limit is " +
-                 std::to_string(kMaxImpulseTaps));
-        }
-        return;
+    // Warn when the impulse will cost a noticeable share of the core even though
+    // it fits the budget: memory is bounded, but the audio thread still has to
+    // keep up, and a filter that is too slow drops samples rather than failing.
+    const size_t appliedChannels = std::max<size_t>(1, currentChannels_.size());
+    const double realtime =
+        impulseRealtimePercent(info.frames, appliedChannels, ctx_.sampleRate);
+    if (log_ && realtime >= 25.0) {
+        log_("Impulse response is expensive: " + resolved + " costs about " +
+             std::to_string(static_cast<int>(realtime)) + "% of a CPU core on " +
+             std::to_string(appliedChannels) + " channel(s) at " +
+             std::to_string(static_cast<int>(ctx_.sampleRate)) + " Hz.");
     }
 
     addToCurrent(std::make_shared<ConvolutionFilter>(std::move(taps)));
+}
+
+bool ConfigCheck::hasDroppedFilter() const {
+    for (const std::string& m : messages) {
+        if (m.find("too long") != std::string::npos ||
+            m.find("Cannot load impulse response") != std::string::npos ||
+            m.find("Dropped a filter") != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+ConfigCheck checkConfigurationFile(const std::string& path, const DeviceContext& context) {
+    ConfigCheck result;
+    ConfigLoader loader(context, [&](const std::string& m) { result.messages.push_back(m); });
+    FilterChain chain = loader.loadFile(path);
+    result.filters = chain.entries.size();
+    return result;
+}
+
+ConfigCheck checkConfigurationText(const std::string& text, const std::string& basePath,
+                                   const DeviceContext& context) {
+    ConfigCheck result;
+    ConfigLoader loader(context, [&](const std::string& m) { result.messages.push_back(m); });
+    FilterChain chain = loader.loadText(text, basePath);
+    result.filters = chain.entries.size();
+    return result;
 }
 
 }  // namespace apolite

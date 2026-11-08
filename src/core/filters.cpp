@@ -11,6 +11,12 @@ namespace apolite {
 namespace {
 constexpr size_t kConvolverBlock = 256;
 
+// Longest FIR the GraphicEQ designer will build. The length is an internal
+// design parameter chosen for frequency resolution, never taken from a file, so
+// it has its own bound and is not subject to the impulse memory budget. 16384
+// taps is 341 ms at 48 kHz, far more than a smooth EQ curve needs.
+constexpr size_t kMaxGraphicEqTaps = size_t{1} << 16;
+
 // -log2(10) / 20: turns a decibel gain into an exp2 exponent, since
 // 10^(-x/20) == 2^(x * kNegLog2TenOver20). exp2 is a single instruction where
 // pow is a library call.
@@ -172,7 +178,7 @@ void CopyFilter::process(const Sample* const* in, Sample* const* out, size_t fra
 
 GraphicEqFilter::GraphicEqFilter(std::vector<EqNode> nodes, size_t filterLength)
     : nodes_(std::move(nodes)),
-      filterLength_(filterLength == 0 ? 16384 : std::min(filterLength, kMaxImpulseTaps)) {}
+      filterLength_(filterLength == 0 ? 16384 : std::min(filterLength, kMaxGraphicEqTaps)) {}
 
 void GraphicEqFilter::prepare(double sampleRate, size_t maxFrames, size_t channels) {
     (void)maxFrames;
