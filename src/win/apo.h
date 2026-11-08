@@ -84,15 +84,20 @@ private:
     bool locked_ = false;
     bool isPreMix_ = false;
     bool isCapture_ = false;
-    bool isFloatFormat_ = true;
 
-    std::vector<float> scratch_;
+    // Read on the audio thread in APOProcess and written by LockForProcess, so
+    // these must be atomic: the audio thread cannot take stateMutex_.
+    std::atomic<bool> isFloatFormat_{true};
+    std::atomic<UINT32> inputChannels_{0};
+    std::atomic<UINT32> outputChannels_{0};
+    std::atomic<UINT32> maxFrames_{0};
 
-    UINT32 inputChannels_ = 0;
-    UINT32 outputChannels_ = 0;
-    UINT32 maxFrames_ = 0;
     UINT32 channelMask_ = 0;
     double sampleRate_ = 48000.0;
+
+    // Conversion staging for the non-in-place path. Sized in LockForProcess so
+    // the audio thread never allocates.
+    std::vector<float> scratch_;
 
     std::wstring deviceName_;
     std::wstring connectionName_;

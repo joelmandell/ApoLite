@@ -13,7 +13,31 @@ Engine::Engine() = default;
 Engine::~Engine() {
     std::lock_guard<std::mutex> lock(publishMutex_);
     published_.store(nullptr, std::memory_order_release);
+    // Nothing is reading any more: the owner is destroying the engine.
+    retired_.clear();
     owned_.reset();
+}
+
+bool Engine::readersQuiescent() {
+    // A reader adds one before loading published_ and one after its last use, so
+    // an even count means no reader can still be inside process(). seq_cst keeps
+    // a reader that is between its increment and its load from being missed: if
+    // this read does not see that increment, the reader's load is ordered after
+    // the store this reclamation follows, so it cannot observe the freed chain.
+    return (readerSeq_.load(std::memory_order_seq_cst) & 1u) == 0;
+}
+
+void Engine::retireLocked() {
+    if (owned_) retired_.push_back(std::move(owned_));
+}
+
+void Engine::reclaimLocked() {
+    // The most recently retired chain is kept as a grace buffer and freed on a
+    // later publish, by which time the audio thread has run many callbacks. That
+    // bounds the retained memory to one chain while leaving a full publish
+    // interval of margin, on top of the quiescence check.
+    if (retired_.size() <= 1 || !readersQuiescent()) return;
+    retired_.erase(retired_.begin(), retired_.end() - 1);
 }
 
 void Engine::configure(double sampleRate, size_t inputChannels, size_t outputChannels,
@@ -21,8 +45,8 @@ void Engine::configure(double sampleRate, size_t inputChannels, size_t outputCha
                        bool postMixInstalled, const std::string& deviceName,
                        const std::string& connectionName, const std::string& deviceGuid) {
     sampleRate_ = sampleRate > 0 ? sampleRate : 48000.0;
-    inputChannels_ = std::max<size_t>(1, inputChannels);
-    outputChannels_ = std::max<size_t>(1, outputChannels);
+    inputChannels_.store(std::max<size_t>(1, inputChannels), std::memory_order_relaxed);
+    outputChannels_.store(std::max<size_t>(1, outputChannels), std::memory_order_relaxed);
     channelMask_ = channelMask;
     isCapture_ = isCapture;
     isPreMix_ = isPreMix;
@@ -31,12 +55,16 @@ void Engine::configure(double sampleRate, size_t inputChannels, size_t outputCha
     connectionName_ = connectionName;
     deviceGuid_ = deviceGuid;
 
-    const size_t deviceChannels = isCapture ? inputChannels_ : outputChannels_;
+    const size_t deviceChannels = isCapture ? inputChannels_.load(std::memory_order_relaxed)
+                                           : outputChannels_.load(std::memory_order_relaxed);
     layout_ = ChannelLayout(deviceChannels, channelMask);
 
+    // A format change invalidates the prepared chain. Retire it rather than
+    // destroying it, in case the audio thread is still inside process().
     std::lock_guard<std::mutex> lock(publishMutex_);
     published_.store(nullptr, std::memory_order_release);
-    owned_.reset();
+    retireLocked();
+    reclaimLocked();
 }
 
 size_t Engine::loadConfiguration(const std::string& path) {
@@ -59,28 +87,33 @@ size_t Engine::loadConfiguration(const std::string& path) {
     auto prepared = std::make_shared<PreparedChain>();
     prepared->chain = std::move(chain);
     prepared->frames = std::max<size_t>(1, options_.maxFrames);
+    prepared->inputChannels = inputChannels_.load(std::memory_order_relaxed);
+    prepared->outputChannels = outputChannels_.load(std::memory_order_relaxed);
+    prepared->limiter = options_.limiterThreshold;
 
     // The chain may create channels beyond the device layout via Copy.
     const size_t channelCount = std::max(prepared->chain.channelNames.size(),
-                                         std::max(outputChannels_, layout_.count()));
+                                         std::max(outputChannels_.load(std::memory_order_relaxed),
+                                                  layout_.count()));
     prepared->buffersA.assign(channelCount, std::vector<Sample>(prepared->frames, 0.0f));
     prepared->buffersB.assign(channelCount, std::vector<Sample>(prepared->frames, 0.0f));
+    const size_t staging = std::max(prepared->inputChannels, prepared->outputChannels);
+    prepared->interleave.assign(std::max<size_t>(staging, 1),
+                                std::vector<Sample>(prepared->frames, 0.0f));
+    prepared->interleavePtrs.assign(prepared->interleave.size(), nullptr);
+    prepared->chainInPtrs.assign(channelCount, nullptr);
+    prepared->chainOutPtrs.assign(channelCount, nullptr);
 
     for (ChainEntry& entry : prepared->chain.entries) {
         if (entry.filter) entry.filter->prepare(sampleRate_, prepared->frames, entry.inChannels.size());
     }
 
-    const size_t maxChannels = std::max(channelCount, size_t{2});
-    scratch_.assign(maxChannels, std::vector<Sample>(prepared->frames, 0.0f));
-    scratchPtrs_.assign(maxChannels, nullptr);
-    chainInPtrs_.assign(maxChannels, nullptr);
-    chainOutPtrs_.assign(maxChannels, nullptr);
-    scratchFrames_ = prepared->frames;
-
     {
         std::lock_guard<std::mutex> lock(publishMutex_);
+        retireLocked();
         owned_ = prepared;
         published_.store(prepared.get(), std::memory_order_release);
+        reclaimLocked();
     }
 
     if (log_) {
@@ -89,26 +122,21 @@ size_t Engine::loadConfiguration(const std::string& path) {
     return prepared->chain.entries.size();
 }
 
-void Engine::processPlanar(const float* const* in, float* const* out, size_t frames) {
-    PreparedChain* pc = published_.load(std::memory_order_acquire);
-    const size_t bypassChannels = std::min(inputChannels_, outputChannels_);
+void Engine::processPlanarWith(PreparedChain* pc, const float* const* in, float* const* out,
+                               size_t frames) {
+    const size_t inputChannels = pc->inputChannels;
+    const size_t outputChannels = pc->outputChannels;
 
-    if (pc == nullptr || frames == 0) {
-        for (size_t c = 0; c < bypassChannels; ++c)
-            if (in[c] != out[c]) std::memcpy(out[c], in[c], frames * sizeof(float));
-        return;
-    }
+    if (frames == 0) return;
 
-    // Chunk so the host may hand us any block size without exceeding the
-    // buffers the chain was prepared with.
     size_t done = 0;
     while (done < frames) {
-        const size_t n = std::min(scratchFrames_, frames - done);
+        const size_t n = std::min(pc->frames, frames - done);
         const size_t channelCount = pc->buffersA.size();
 
         for (size_t c = 0; c < channelCount; ++c) {
             Sample* dst = pc->buffersA[c].data();
-            if (c < inputChannels_ && in[c] != nullptr) {
+            if (c < inputChannels && in[c] != nullptr) {
                 std::memcpy(dst, in[c] + done, n * sizeof(Sample));
             } else {
                 std::memset(dst, 0, n * sizeof(Sample));
@@ -116,7 +144,7 @@ void Engine::processPlanar(const float* const* in, float* const* out, size_t fra
         }
 
         // Windows upmixes mono to stereo automatically; mirror that behaviour.
-        if (inputChannels_ == 1 && channelCount >= 2)
+        if (inputChannels == 1 && channelCount >= 2)
             std::memcpy(pc->buffersA[1].data(), pc->buffersA[0].data(), n * sizeof(Sample));
 
         for (ChainEntry& entry : pc->chain.entries) {
@@ -124,8 +152,8 @@ void Engine::processPlanar(const float* const* in, float* const* out, size_t fra
             const size_t nIn = entry.inChannels.size();
             const size_t nOut = entry.outChannels.size();
 
-            Sample** inPtrs = chainInPtrs_.data();
-            Sample** outPtrs = chainOutPtrs_.data();
+            Sample** inPtrs = pc->chainInPtrs.data();
+            Sample** outPtrs = pc->chainOutPtrs.data();
             for (size_t i = 0; i < nIn; ++i) inPtrs[i] = pc->buffersA[entry.inChannels[i]].data();
             for (size_t i = 0; i < nOut; ++i) {
                 const size_t ch = entry.outChannels[i];
@@ -143,8 +171,8 @@ void Engine::processPlanar(const float* const* in, float* const* out, size_t fra
             }
         }
 
-        const double limit = options_.limiterThreshold;
-        for (size_t c = 0; c < outputChannels_; ++c) {
+        const double limit = pc->limiter;
+        for (size_t c = 0; c < outputChannels; ++c) {
             if (c >= channelCount) {
                 std::memset(out[c] + done, 0, n * sizeof(float));
                 continue;
@@ -164,29 +192,50 @@ void Engine::processPlanar(const float* const* in, float* const* out, size_t fra
         }
         done += n;
     }
+
+}
+
+void Engine::processPlanar(const float* const* in, float* const* out, size_t frames) {
+    ReaderGuard guard(readerSeq_);
+    PreparedChain* pc = published_.load(std::memory_order_acquire);
+    if (pc == nullptr || frames == 0) {
+        // No configuration is loaded: pass audio through untouched. The counts
+        // are atomic, so this is safe even mid-reconfigure.
+        const size_t bypass =
+            std::min(inputChannels_.load(std::memory_order_relaxed),
+                     outputChannels_.load(std::memory_order_relaxed));
+        for (size_t c = 0; c < bypass; ++c)
+            if (in[c] != out[c]) std::memcpy(out[c], in[c], frames * sizeof(float));
+        return;
+    }
+    processPlanarWith(pc, in, out, frames);
 }
 
 void Engine::processInterleaved(float* buffer, size_t frames) {
+    ReaderGuard guard(readerSeq_);
     PreparedChain* pc = published_.load(std::memory_order_acquire);
     if (pc == nullptr || frames == 0) return;
 
-    const size_t channels = outputChannels_;
+    const size_t channels = pc->outputChannels;
+    if (channels == 0) return;
+    // The staging buffers are sized for the published chain, so a host block
+    // larger than that is chunked. Nothing is allocated here.
     size_t done = 0;
     while (done < frames) {
-        const size_t n = std::min(scratchFrames_, frames - done);
+        const size_t n = std::min(pc->frames, frames - done);
         float* chunk = buffer + done * channels;
 
         for (size_t c = 0; c < channels; ++c) {
-            Sample* dst = scratch_[c].data();
+            Sample* dst = pc->interleave[c].data();
             for (size_t i = 0; i < n; ++i) dst[i] = chunk[i * channels + c];
-            scratchPtrs_[c] = scratch_[c].data();
+            pc->interleavePtrs[c] = dst;
         }
 
-        processPlanar(const_cast<const float* const*>(scratchPtrs_.data()), scratchPtrs_.data(),
-                      n);
+        processPlanarWith(pc, const_cast<const float* const*>(pc->interleavePtrs.data()),
+                          pc->interleavePtrs.data(), n);
 
         for (size_t c = 0; c < channels; ++c) {
-            const Sample* src = scratch_[c].data();
+            const Sample* src = pc->interleave[c].data();
             for (size_t i = 0; i < n; ++i) chunk[i * channels + c] = src[i];
         }
         done += n;

@@ -73,7 +73,12 @@ Biquad Biquad::design(FilterType type, double gainDb, double freq, double sample
     if (kind == ParamKind::Bandwidth) {
         alpha = sn * std::sinh(kLn2 / 2.0 * q * w0 / sn);
     } else if (kind == ParamKind::ShelfSlope && shelf) {
-        alpha = sn / 2.0 * std::sqrt((A + 1.0 / A) * (1.0 / q - 1.0) + 2.0);
+        // The cookbook radicand goes negative for a slope parameter above the
+        // shelf's maximum, which makes sqrt produce NaN and poisons the channel
+        // with NaN for as long as the filter is loaded. Clamp it to zero, which
+        // yields the steepest slope the equations admit.
+        const double radicand = (A + 1.0 / A) * (1.0 / q - 1.0) + 2.0;
+        alpha = sn / 2.0 * std::sqrt(radicand > 0.0 ? radicand : 0.0);
     } else {
         alpha = sn / (2.0 * (q > 0.0 ? q : 0.7071067811865476));
     }
@@ -156,6 +161,14 @@ Biquad Biquad::design(FilterType type, double gainDb, double freq, double sample
     c.b2 = b2 * inv;
     c.a1 = a1 * inv;
     c.a2 = a2 * inv;
+
+    // Last line of defence. A non-finite coefficient would put NaN into the
+    // filter state, where it persists and silences the channel for good, so fall
+    // back to unity rather than let one through.
+    if (!std::isfinite(c.b0) || !std::isfinite(c.b1) || !std::isfinite(c.b2) ||
+        !std::isfinite(c.a1) || !std::isfinite(c.a2)) {
+        c = BiquadCoeffs{};
+    }
 
     Biquad bq;
     bq.setCoeffs(c);
