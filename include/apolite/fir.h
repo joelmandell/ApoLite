@@ -18,28 +18,60 @@ namespace apolite {
 std::vector<double> designMinimumPhaseFir(size_t length, double sampleRate,
                                           const std::function<double(double)>& magAt);
 
-// Longest impulse the convolver accepts, 2^18 taps, about 5.5 s at 48 kHz and
-// far longer than room correction needs. The partitioned convolver holds roughly
-// eight times the impulse length, and it holds that once for the shared kernel,
-// so this bounds a kernel at about 4 MB instead of letting a long file exhaust
-// memory. A longer file is rejected rather than truncated, so the user sees a
-// clear error instead of a filter that quietly does not match the file.
-constexpr size_t kMaxImpulseTaps = size_t{1} << 18;
+// Default ceiling on the heap the impulse convolvers in one configuration may
+// hold, in bytes. This bounds memory rather than tap count, because memory is
+// what a long file actually costs and what varies with the channel count; a tap
+// count would be an arbitrary number that means different things for a mono and
+// a four-channel device. 256 MB is far above any real impulse response (a 1 s
+// stereo response is about 3 MB) and only refuses a file that would exhaust the
+// host process. A caller may raise it for a deliberate long impulse.
+constexpr size_t kImpulseMemoryBudgetBytes = size_t{256} * 1024 * 1024;
+
+// Hard ceiling on one impulse's spectra, in bytes, whatever the configuration
+// budget is set to. This is an overflow guard rather than a policy limit: a
+// single FirKernel refuses to build past it, so no configuration can make the
+// process allocate without bound even if the budget is raised.
+constexpr size_t kMaxFirKernelBytes = size_t{2} * 1024 * 1024 * 1024;
+
+// Longest impulse that fits the budget for `channels` channels at `blockSize`,
+// with `distinctKernels` different impulses among them. The inverse of
+// firMemoryBytes: a caller that knows the channel count uses this to reject a
+// file from its header, before any samples are read. Returns 0 when even one tap
+// does not fit, which cannot happen with the default budget.
+size_t maxImpulseTapsForBudget(size_t channels, size_t budgetBytes = kImpulseMemoryBudgetBytes,
+                               size_t blockSize = 256, size_t distinctKernels = 1);
+
+// Heap one kernel's spectra need, in bytes. The per-channel delay lines are not
+// included; see firMemoryBytes for the whole cost.
+size_t firKernelBytes(size_t taps, size_t blockSize = 256);
+
+// Estimated share of one CPU core that convolving `taps` taps on `channels`
+// channels costs, as a percentage of real time at `sampleRate`. Advisory only:
+// the cost depends on the machine, so it is reported to the user rather than
+// used as a hard limit. A figure near or above 100 means the audio thread cannot
+// keep up and the host will drop samples.
+double impulseRealtimePercent(size_t taps, size_t channels, double sampleRate);
 
 // Approximate heap the convolver holds, in bytes, for `taps` taps applied to
-// `channels` channels at `blockSize`. The impulse spectra are shared by every
-// channel, so they are counted once, which is the point: without sharing the
-// per-channel part would include a whole second copy of the spectra. Lets a
-// caller log or bound the cost before allocating.
-size_t firMemoryBytes(size_t taps, size_t channels, size_t blockSize = 256);
+// `channels` channels at `blockSize`. A mono impulse applied to every channel is
+// expanded once and shared, so the spectra are counted once; a stereo file holds
+// `distinctKernels` spectra. The per-channel delay lines are counted for every
+// channel. Lets a caller log or bound the cost before allocating.
+size_t firMemoryBytes(size_t taps, size_t channels, size_t blockSize = 256,
+                      size_t distinctKernels = 1);
 
 // The impulse spectra for one impulse, immutable once built. Every channel that
 // convolves with the same impulse shares one of these, so the spectra are
 // computed and stored once instead of once per channel.
 class FirKernel {
 public:
-    // Throws std::length_error if `taps` is longer than kMaxImpulseTaps.
-    FirKernel(std::vector<double> taps, size_t blockSize = 256);
+    // Throws std::length_error if the spectra would exceed `maxBytes`, which
+    // defaults to kMaxFirKernelBytes. The bound is an overflow guard, not a
+    // policy limit; the caller decides how long an impulse may be, using
+    // firMemoryBytes and its own budget. `maxBytes` is exposed so a caller can
+    // hold a kernel to a tighter limit of its own.
+    FirKernel(std::vector<double> taps, size_t blockSize = 256,
+              size_t maxBytes = kMaxFirKernelBytes);
 
     size_t blockSize() const { return block_; }
     size_t tapCount() const { return taps_; }
@@ -68,7 +100,7 @@ private:
 class FirConvolver {
 public:
     // Builds a private kernel. Throws std::length_error if the impulse is longer
-    // than kMaxImpulseTaps.
+    // than kMaxFirKernelBytes allows.
     FirConvolver(std::vector<double> taps, size_t blockSize = 256);
 
     // Shares a kernel that was built once for several channels.

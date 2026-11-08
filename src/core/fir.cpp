@@ -22,18 +22,63 @@ size_t partitionsFor(size_t taps, size_t block) {
 
 }  // namespace
 
-size_t firMemoryBytes(size_t taps, size_t channels, size_t blockSize) {
+size_t firKernelBytes(size_t taps, size_t blockSize) {
+    const size_t block = blockSize ? blockSize : 1;
+    const size_t bins = block + 1;
+    return partitionsFor(taps, block) * bins * sizeof(cplx);
+}
+
+size_t firMemoryBytes(size_t taps, size_t channels, size_t blockSize, size_t distinctKernels) {
     const size_t block = blockSize ? blockSize : 1;
     const size_t fftSize = block * 2;
     const size_t bins = fftSize / 2 + 1;
     const size_t partitions = partitionsFor(taps, block);
 
-    // Shared kernel: the impulse spectra, held once.
+    if (channels == 0) channels = 1;
+    if (distinctKernels == 0) distinctKernels = 1;
+
+    // Shared spectra: one per distinct impulse, not one per channel.
     const size_t kernel = partitions * bins * sizeof(cplx);
-    // Per channel: the delay line, which is the same size as the kernel.
-    const size_t perChannel = partitions * bins * sizeof(cplx) +
-                              (2 * block + 3 * block) * sizeof(double) + 4 * bins * sizeof(cplx);
-    return kernel + channels * perChannel;
+    // Per channel: the delay line, the same size as one kernel, plus the fixed
+    // buffers a convolver holds whatever the impulse length.
+    const size_t fixed = (2 * block + 3 * block) * sizeof(double) + 4 * bins * sizeof(cplx);
+    const size_t perChannel = partitions * bins * sizeof(cplx) + fixed;
+    return distinctKernels * kernel + channels * perChannel;
+}
+
+size_t maxImpulseTapsForBudget(size_t channels, size_t budgetBytes, size_t blockSize,
+                               size_t distinctKernels) {
+    // Walk the tap count that fits, by inverting the two terms that grow with
+    // it. firMemoryBytes is monotonic in taps, so a binary search is exact and
+    // avoids solving the partition arithmetic by hand.
+    if (channels == 0) channels = 1;
+    if (distinctKernels == 0) distinctKernels = 1;
+    if (budgetBytes == 0) return 0;
+    if (firMemoryBytes(1, channels, blockSize, distinctKernels) > budgetBytes) return 0;
+
+    size_t lo = 1;                 // known to fit
+    size_t hi = size_t{1} << 40;   // known not to fit: 2^40 taps is far past any budget
+    while (lo + 1 < hi) {
+        const size_t mid = lo + (hi - lo) / 2;
+        if (firMemoryBytes(mid, channels, blockSize, distinctKernels) <= budgetBytes) lo = mid;
+        else hi = mid;
+    }
+    return lo;
+}
+
+double impulseRealtimePercent(size_t taps, size_t channels, double sampleRate) {
+    if (sampleRate <= 0.0) return 0.0;
+    // Measured on the reference machine with a 256-frame block, over 4096 to
+    // 1048576 taps: cost is linear in the tap count with a fixed per-block
+    // overhead, ns/sample = 0.00403 * taps + 42.3. The per-tap term is the
+    // frequency-domain multiply and accumulate; the constant is the forward and
+    // inverse transform of the block, which is paid whatever the impulse length.
+    constexpr double kNsPerTapPerSample = 0.00403;
+    constexpr double kNsPerBlockPerSample = 42.3;
+    const double perSampleNs = kNsPerTapPerSample * static_cast<double>(taps) + kNsPerBlockPerSample;
+    const double channelCount = static_cast<double>(channels == 0 ? 1 : channels);
+    const double sampleNs = 1e9 / sampleRate;
+    return perSampleNs * channelCount / sampleNs * 100.0;
 }
 
 std::vector<double> designMinimumPhaseFir(size_t length, double sampleRate,
@@ -84,15 +129,17 @@ std::vector<double> designMinimumPhaseFir(size_t length, double sampleRate,
     return out;
 }
 
-FirKernel::FirKernel(std::vector<double> taps, size_t blockSize)
+FirKernel::FirKernel(std::vector<double> taps, size_t blockSize, size_t maxBytes)
     : block_(blockSize ? blockSize : 1),
       fftSize_(block_ * 2),
       bins_(block_ + 1),
       taps_(taps.size()),
       fft_(block_ * 2) {
-    if (taps_ > kMaxImpulseTaps) {
-        throw std::length_error("impulse response is longer than the " +
-                                std::to_string(kMaxImpulseTaps) + "-tap limit");
+    const size_t bytes = firKernelBytes(taps_, block_);
+    if (bytes > maxBytes) {
+        throw std::length_error("impulse response needs " + std::to_string(bytes / (1024 * 1024)) +
+                                " MB of spectra, over the " +
+                                std::to_string(maxBytes / (1024 * 1024)) + " MB ceiling");
     }
 
     partitions_ = partitionsFor(taps_, block_);

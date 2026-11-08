@@ -23,6 +23,7 @@
 #include "apolite/fft.h"
 #include "apolite/fir.h"
 #include "apolite/gain.h"
+#include "apolite/impulse.h"
 #include "apolite/registry.h"
 #include "apolite/settings.h"
 
@@ -239,43 +240,94 @@ void testFirArbitraryBlockSizes() {
     }
 }
 
-// The convolver must refuse an impulse longer than its cap rather than trying
-// to expand it into spectra. Without the cap a long file exhausts memory.
-void testFirImpulseCap() {
+// A kernel refuses to expand past the byte bound it is given. The bound is an
+// overflow guard, not a policy one, which is what makes a raised budget safe.
+void testFirKernelByteCeiling() {
     const size_t block = 256;
-    const size_t over = apolite::kMaxImpulseTaps + block;
 
-    std::vector<double> tooLong(over, 0.0);
-    tooLong[0] = 1.0;
+    // Hold the kernel to a small bound so the test stays fast: the same code
+    // path runs, without building a gigabyte of spectra.
+    const size_t bound = 8u * 1024u * 1024u;
+    size_t maxTaps = 1;
+    while (apolite::firKernelBytes(maxTaps + block, block) <= bound) maxTaps += block;
+    check(apolite::firKernelBytes(maxTaps, block) <= bound,
+          "the largest admitted impulse fits the ceiling");
 
+    // At the bound must build, one partition past it must be refused.
+    std::vector<double> atBound(maxTaps, 0.0);
+    atBound[0] = 1.0;
+    bool okAtBound = true;
+    try {
+        apolite::FirKernel k(atBound, block, bound);
+    } catch (const std::exception&) {
+        okAtBound = false;
+    }
+    check(okAtBound, "an impulse at the byte ceiling is accepted");
+
+    std::vector<double> over(maxTaps + block, 0.0);
+    over[0] = 1.0;
     bool threw = false;
     try {
-        apolite::FirConvolver c(tooLong, block);
+        apolite::FirKernel k(over, block, bound);
     } catch (const std::length_error&) {
         threw = true;
     }
-    check(threw, "impulse longer than the cap is rejected");
+    check(threw, "impulse past the byte ceiling is rejected");
 
-    // Exactly at the cap must still work, so the boundary is not off by one.
-    std::vector<double> atCap(apolite::kMaxImpulseTaps, 0.0);
-    atCap[0] = 1.0;
-    bool okAtCap = true;
-    try {
-        apolite::FirConvolver c(atCap, block);
-        std::vector<double> x(block, 0.25), y(block, 0.0);
-        c.process(x.data(), y.data(), block);
-    } catch (const std::exception&) {
-        okAtCap = false;
-    }
-    check(okAtCap, "impulse exactly at the cap is accepted");
-
-    // The reported memory must grow with the tap count, and must be bounded at
-    // the cap: the shared kernel is about eight times the impulse length.
+    // The reported memory must grow with the tap count.
     // Not named `small`/`large`: the Windows headers define `small` as a macro.
     const size_t smallBytes = apolite::firMemoryBytes(16384, 1, block);
-    const size_t largeBytes = apolite::firMemoryBytes(apolite::kMaxImpulseTaps, 1, block);
+    const size_t largeBytes = apolite::firMemoryBytes(262144, 1, block);
     check(largeBytes > smallBytes, "reported memory grows with tap count");
-    check(largeBytes < 16u * 1024u * 1024u, "memory at the cap stays under 16 MB per channel");
+}
+
+// The budget is in memory, not taps, so the tap limit must shrink as the channel
+// count grows: the same file costs more on a wider device.
+void testImpulseBudgetScalesWithChannels() {
+    const size_t block = 256;
+    const size_t budget = apolite::kImpulseMemoryBudgetBytes;
+
+    const size_t mono = apolite::maxImpulseTapsForBudget(1, budget, block);
+    const size_t stereo = apolite::maxImpulseTapsForBudget(2, budget, block);
+    const size_t quad = apolite::maxImpulseTapsForBudget(4, budget, block);
+
+    check(mono > stereo && stereo > quad, "more channels allow fewer taps for the same budget");
+
+    // Whatever it returns must actually fit, and one more tap must not.
+    for (size_t ch : {size_t{1}, size_t{2}, size_t{4}}) {
+        const size_t taps = apolite::maxImpulseTapsForBudget(ch, budget, block);
+        check(apolite::firMemoryBytes(taps, ch, block) <= budget,
+              "the tap count the budget allows fits the budget");
+        check(apolite::firMemoryBytes(taps + block, ch, block) > budget,
+              "one block more than the budget allows does not fit");
+    }
+
+    // A tiny budget must refuse rather than underflow.
+    check(apolite::maxImpulseTapsForBudget(8, 1, block) == 0, "a budget too small allows no taps");
+
+    // A stereo file holds one spectrum per channel, so the same tap count costs
+    // more than a mono file shared across the same channels.
+    const size_t monoFile = apolite::firMemoryBytes(262144, 2, block, 1);
+    const size_t stereoFile = apolite::firMemoryBytes(262144, 2, block, 2);
+    check(stereoFile > monoFile, "a stereo impulse costs more than a shared mono one");
+}
+
+// The realtime estimate must rise with length and with channel count, and must
+// cross 100% at a length that is plainly too slow, so the warning is meaningful.
+void testImpulseRealtimeEstimate() {
+    const double at48k = 48000.0;
+    const double shortMono = apolite::impulseRealtimePercent(16384, 1, at48k);
+    const double longMono = apolite::impulseRealtimePercent(1048576, 1, at48k);
+    const double longStereo = apolite::impulseRealtimePercent(1048576, 2, at48k);
+
+    check(longMono > shortMono, "a longer impulse costs more");
+    check(longStereo > longMono, "more channels cost more");
+    check(shortMono > 0.0 && shortMono < 1.0, "a short impulse is a small share of the core");
+    // 2^23 taps is the point where one channel alone cannot keep up.
+    check(apolite::impulseRealtimePercent(size_t{1} << 23, 1, at48k) > 100.0,
+          "an impulse past 8 million taps cannot run in real time");
+    check(apolite::impulseRealtimePercent(size_t{1} << 23, 2, at48k) > 200.0,
+          "the same impulse on two channels costs about twice as much");
 }
 
 // Channels that convolve with the same impulse must share one kernel, so the
@@ -334,15 +386,9 @@ void testEngineGraphicEqSharesKernel() {
     checkNear(maxErr, 0.0, 1e-6, "stereo flat graphic EQ is transparent");
 }
 
-// A Convolution whose impulse file is too long must be dropped with a message,
-// leaving the rest of the chain running, not crash the process.
-void testEngineConvolutionTooLong() {
-    // A real WAV of more taps than the cap. The loader must reject it before it
-    // is expanded into spectra; the file itself is small on disk because the
-    // samples are zero, but the tap count is what matters.
-    const size_t taps = apolite::kMaxImpulseTaps + 1024;
-    const size_t dataBytes = taps * 2;  // 16-bit mono
-
+// Build a 16-bit mono WAV of `taps` silent frames in memory.
+std::vector<unsigned char> makeMonoWav(size_t taps) {
+    const size_t dataBytes = taps * 2;
     std::vector<unsigned char> wav;
     auto u32 = [&](uint32_t v) {
         wav.push_back(v & 0xFF); wav.push_back((v >> 8) & 0xFF);
@@ -357,26 +403,152 @@ void testEngineConvolutionTooLong() {
     const char* data = "data"; wav.insert(wav.end(), data, data + 4);
     u32(static_cast<uint32_t>(dataBytes));
     wav.resize(wav.size() + dataBytes, 0);
+    return wav;
+}
 
-    const std::string wavPath = tempDir() + "/apolite_test_too_long.wav";
-    FILE* f = std::fopen(wavPath.c_str(), "wb");
+void writeFileBytes(const std::string& path, const std::vector<unsigned char>& bytes) {
+    FILE* f = std::fopen(path.c_str(), "wb");
     if (f) {
-        std::fwrite(wav.data(), 1, wav.size(), f);
+        std::fwrite(bytes.data(), 1, bytes.size(), f);
         std::fclose(f);
     }
+}
+
+// Reading only the header must report the same length as a full load, and must
+// do so without the file's sample data having to be decoded.
+void testInspectWavImpulse() {
+    const std::string path = tempDir() + "/apolite_test_inspect.wav";
+    writeFileBytes(path, makeMonoWav(5000));
+
+    const apolite::WavImpulseInfo info = apolite::inspectWavImpulse(path);
+    check(info.ok, "a valid WAV header is read");
+    check(info.frames == 5000, "the header reports the frame count");
+    check(info.channels == 1, "the header reports the channel count");
+    check(info.bytesPerSample == 2, "the header reports the sample size");
+
+    const apolite::WavImpulseInfo missing = apolite::inspectWavImpulse(tempDir() + "/nope.wav");
+    check(!missing.ok, "a missing file is reported as not readable");
+}
+
+// A file cut short on disk still declares its full length in the header. The
+// header read must report that declared length, and the loader must decode only
+// the samples actually present rather than reading past the buffer.
+void testTruncatedWavImpulse() {
+    std::vector<unsigned char> full = makeMonoWav(5000);
+    std::vector<unsigned char> cut(full.begin(), full.begin() + 44 + 1000);
+    const std::string path = tempDir() + "/apolite_test_truncated.wav";
+    writeFileBytes(path, cut);
+
+    const apolite::WavImpulseInfo info = apolite::inspectWavImpulse(path);
+    check(info.ok, "a truncated file still has a readable header");
+    check(info.frames == 5000, "the header reports the declared length, not what is present");
+
+    const std::vector<std::vector<double>> taps = apolite::loadWavImpulse(path);
+    check(taps.size() == 1, "the truncated file loads its channel");
+    check(taps.size() == 1 && taps[0].size() == 500,
+          "the loader decodes only the samples actually present");
+
+    // A WAVE_FORMAT_EXTENSIBLE header whose fmt chunk claims 40 bytes but is cut
+    // short. The sub-format GUID sits at byte 24 of the body, so parsing it
+    // without regard for what is present reads past the header the parser was
+    // given. The header must be rejected rather than trusted.
+    std::vector<unsigned char> ext;
+    auto u32 = [&](uint32_t v) {
+        ext.push_back(v & 0xFF); ext.push_back((v >> 8) & 0xFF);
+        ext.push_back((v >> 16) & 0xFF); ext.push_back((v >> 24) & 0xFF);
+    };
+    auto u16 = [&](uint16_t v) { ext.push_back(v & 0xFF); ext.push_back((v >> 8) & 0xFF); };
+    const char* riff = "RIFF"; ext.insert(ext.end(), riff, riff + 4);
+    u32(36); const char* wave = "WAVE"; ext.insert(ext.end(), wave, wave + 4);
+    const char* fmt = "fmt "; ext.insert(ext.end(), fmt, fmt + 4);
+    u32(40); u16(0xFFFE); u16(1); u32(48000); u32(96000); u16(2); u16(16);
+    ext.insert(ext.end(), 4, 0);  // 40 bytes so far; the fmt body is short of 40
+    ext.resize(44, 0);            // exactly 44: a stray read of body+24 leaves the buffer
+    const std::string extPath = tempDir() + "/apolite_test_ext_truncated.wav";
+    writeFileBytes(extPath, ext);
+    check(!apolite::inspectWavImpulse(extPath).ok, "a cut extensible header is not readable");
+    check(apolite::loadWavImpulse(extPath).empty(), "a cut extensible header does not load");
+
+    // A header cut before the fmt chunk is parsed must not be read past either.
+    std::vector<unsigned char> stub(full.begin(), full.begin() + 24);
+    const std::string stubPath = tempDir() + "/apolite_test_stub.wav";
+    writeFileBytes(stubPath, stub);
+    check(!apolite::inspectWavImpulse(stubPath).ok, "a header cut mid-chunk is not readable");
+    check(apolite::loadWavImpulse(stubPath).empty(), "a header cut mid-chunk does not load");
+}
+
+// A file over the budget is refused, the rest of the chain still loads, and the
+// refusal is reported through the log rather than being silent.
+void testEngineConvolutionOverBudget() {
+    // One tap more than the default budget allows for a single channel.
+    const size_t taps = apolite::maxImpulseTapsForBudget(1, apolite::kImpulseMemoryBudgetBytes) + 1;
+    const std::string wavPath = tempDir() + "/apolite_test_over_budget.wav";
+    writeFileBytes(wavPath, makeMonoWav(taps));
 
     const std::string cfg =
-        writeTemp("conv_too_long.txt", "Convolution: " + wavPath + "\nPreamp: 3 dB\n");
+        writeTemp("conv_over_budget.txt", "Convolution: " + wavPath + "\nPreamp: 3 dB\n");
+
+    std::vector<std::string> messages;
     apolite::Engine engine;
+    engine.setLogSink([&](const std::string& m) { messages.push_back(m); });
     engine.configure(48000.0, 1, 1, 0, true, false, true, "Mic", "Mic", "");
 
-    // Only the Preamp survives: the oversized convolution is rejected.
-    check(engine.loadConfiguration(cfg) == 1, "an oversized impulse is dropped from the chain");
+    // Only the Preamp survives: the oversized convolution is refused.
+    check(engine.loadConfiguration(cfg) == 1, "an over-budget impulse is dropped from the chain");
+
+    bool named = false;
+    for (const std::string& m : messages) {
+        if (m.find("too long") != std::string::npos && m.find(wavPath) != std::string::npos) {
+            named = true;
+        }
+    }
+    check(named, "the refusal names the file and says it is too long");
 
     const size_t n = 480;
     std::vector<float> buf(n, 0.5f);
     engine.processInterleaved(buf.data(), n);
     check(std::isfinite(buf[0]) && std::fabs(buf[0]) > 0.0f, "the chain still processes audio");
+}
+
+// Raising the budget with ImpulseBudgetMB must let the same file through, which
+// is the whole point of making the limit a setting rather than a constant.
+void testImpulseBudgetIsConfigurable() {
+    const size_t taps = apolite::maxImpulseTapsForBudget(1, apolite::kImpulseMemoryBudgetBytes) + 1;
+    const std::string wavPath = tempDir() + "/apolite_test_raise_budget.wav";
+    writeFileBytes(wavPath, makeMonoWav(taps));
+
+    const std::string cfg = writeTemp(
+        "conv_raise_budget.txt",
+        "ImpulseBudgetMB: 1024\nConvolution: " + wavPath + "\nPreamp: 3 dB\n");
+
+    apolite::Engine engine;
+    engine.configure(48000.0, 1, 1, 0, true, false, true, "Mic", "Mic", "");
+    check(engine.loadConfiguration(cfg) == 2, "a raised budget admits the impulse");
+}
+
+// The editor validates text before writing it. The same over-budget file must be
+// reported by the text check, so the pre-Apply warning has something to show.
+void testCheckConfigurationText() {
+    const size_t taps = apolite::maxImpulseTapsForBudget(1, apolite::kImpulseMemoryBudgetBytes) + 1;
+    const std::string wavPath = tempDir() + "/apolite_test_check_text.wav";
+    writeFileBytes(wavPath, makeMonoWav(taps));
+
+    apolite::DeviceContext ctx;
+    ctx.sampleRate = 48000.0;
+    ctx.channelCount = 1;
+    ctx.isCapture = true;
+    ctx.stageName = "capture";
+
+    const apolite::ConfigCheck over =
+        apolite::checkConfigurationText("Convolution: " + wavPath + "\n", tempDir() + "/config.txt",
+                                        ctx);
+    check(over.hasDroppedFilter(), "the text check reports an over-budget impulse");
+
+    const apolite::ConfigCheck fine =
+        apolite::checkConfigurationText("Preamp: 3 dB\nGraphicEQ: 100 0; 1000 0\n",
+                                        tempDir() + "/config.txt", ctx);
+    check(!fine.hasDroppedFilter(), "the text check passes an ordinary configuration");
+    check(fine.filters == 2, "the text check counts the filters it built");
 }
 
 // ------------------------------------------------------- Expression tests
@@ -1074,7 +1246,9 @@ int main() {
     testBiquad();
     testFir();
     testFirArbitraryBlockSizes();
-    testFirImpulseCap();
+    testFirKernelByteCeiling();
+    testImpulseBudgetScalesWithChannels();
+    testImpulseRealtimeEstimate();
     testFirKernelSharedAcrossChannels();
     testExpression();
     testChannelLayout();
@@ -1087,7 +1261,11 @@ int main() {
     testEngineGraphicEq();
     testEngineGraphicEqArbitraryBlocks();
     testEngineGraphicEqSharesKernel();
-    testEngineConvolutionTooLong();
+    testInspectWavImpulse();
+    testTruncatedWavImpulse();
+    testEngineConvolutionOverBudget();
+    testImpulseBudgetIsConfigurable();
+    testCheckConfigurationText();
     testEngineIf();
     testEngineElseBranch();
     testEngineDevice();

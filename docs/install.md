@@ -111,9 +111,12 @@ tasklist /m ApoLite.dll
 `audiodg.exe` should appear in the list. If it does not, the effect is not
 enabled on any active device.
 
-Diagnostics are written with `OutputDebugString`, so they show up in
+Diagnostics are written to `%ProgramData%\ApoLite\config\apolite.log`, next to
+the configuration file, and to `OutputDebugString` so they also show up in
 [DebugView](https://learn.microsoft.com/sysinternals/downloads/debugview) or any
-attached debugger.
+attached debugger. The log is the place to look when a filter does not seem to
+take effect: a filter that is dropped, such as an impulse response that does not
+fit the memory budget, is reported there with the reason.
 
 ## Troubleshooting
 

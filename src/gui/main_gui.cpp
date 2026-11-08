@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "apolite/apolite.h"
+#include "apolite/config.h"
 #include "apolite/settings.h"
 #include "curve.h"
 
@@ -101,6 +102,28 @@ std::string readFile(const std::wstring& path) {
     return text;
 }
 
+// UTF-8 <-> UTF-16, for the few places the editor and the engine must exchange
+// text. Configuration messages are UTF-8; the window API is UTF-16.
+std::wstring widen(const std::string& s) {
+    if (s.empty()) return {};
+    const int size = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                         nullptr, 0);
+    std::wstring out(static_cast<size_t>(size > 0 ? size : 0), L'\0');
+    if (size > 0) MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                      out.data(), size);
+    return out;
+}
+
+std::string narrow(const std::wstring& s) {
+    if (s.empty()) return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                         nullptr, 0, nullptr, nullptr);
+    std::string out(static_cast<size_t>(size > 0 ? size : 0), '\0');
+    if (size > 0) WideCharToMultiByte(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                      out.data(), size, nullptr, nullptr);
+    return out;
+}
+
 // One editable band: an optional checkbox and a value box.
 struct Row {
     int id = 0;
@@ -108,7 +131,6 @@ struct Row {
     HWND check = nullptr;
     HWND edit = nullptr;
 };
-
 class EditorWindow {
 public:
     bool create(HINSTANCE instance);
@@ -131,6 +153,10 @@ private:
     void resetToDefaults();
     void setStatus(const std::wstring& text, bool isError = false);
     void updateRowEnabling();
+
+    // Load `text` into a throwaway chain and, if a filter would be dropped, ask
+    // the user whether to continue. Returns false when the user cancels.
+    bool warnAboutDroppedFilters(const std::string& text);
 
     void paintCurve(HDC dc);
     void paintSummary(HDC dc);
@@ -425,6 +451,12 @@ void EditorWindow::apply() {
     }
     preservedLines_ = keep;
 
+    // Check the text that is about to be written, before it replaces the file.
+    // A Convolution whose impulse does not fit the budget is dropped by the APO,
+    // and without this the user would only find out from the log file. Writing
+    // first and warning afterwards would be too late to be useful.
+    if (!warnAboutDroppedFilters(out)) return;
+
     const size_t slash = configPath_.find_last_of(L'\\');
     if (slash != std::wstring::npos) {
         SHCreateDirectoryExW(nullptr, configPath_.substr(0, slash).c_str(), nullptr);
@@ -457,6 +489,37 @@ void EditorWindow::apply() {
 
     InvalidateRect(hwnd_, nullptr, TRUE);
     setStatus(L"Applied to " + configPath_ + L". Audio updates within about a second.");
+}
+
+bool EditorWindow::warnAboutDroppedFilters(const std::string& text) {
+    apolite::DeviceContext ctx;
+    ctx.sampleRate = 48000.0;
+    ctx.channelCount = settings_.target == Target::Microphone ? 1 : 2;
+    ctx.isCapture = settings_.target == Target::Microphone;
+    ctx.isPreMix = false;
+    ctx.stageName = ctx.isCapture ? "capture" : "post-mix";
+
+    const apolite::ConfigCheck check =
+        apolite::checkConfigurationText(text, narrow(configPath_), ctx);
+    if (!check.hasDroppedFilter()) return true;
+
+    std::wstring detail;
+    for (const std::string& m : check.messages) {
+        if (m.find("too long") == std::string::npos &&
+            m.find("Cannot load impulse response") == std::string::npos) {
+            continue;
+        }
+        detail += widen(m) + L"\n";
+    }
+
+    const std::wstring question =
+        L"A filter will be dropped when this is applied:\n\n" + detail +
+        L"\nWrite the settings anyway?\n\n"
+        L"An impulse response can be shortened, or the budget raised with a "
+        L"line such as \"ImpulseBudgetMB: 512\".";
+    const int answer = MessageBoxW(hwnd_, question.c_str(), L"ApoLite",
+                                   MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+    return answer == IDOK;
 }
 
 void EditorWindow::resetToDefaults() {

@@ -10,6 +10,7 @@
 
 #include "apolite/expression.h"
 #include "apolite/filter.h"
+#include "apolite/fir.h"
 
 namespace apolite {
 
@@ -51,9 +52,38 @@ struct DeviceContext {
 // Receives diagnostic messages (unknown commands, parse errors, ...).
 using LogSink = std::function<void(const std::string&)>;
 
+// What a configuration produced when it was loaded, without publishing it.
+struct ConfigCheck {
+    size_t filters = 0;
+    // The same messages the APO logs, so an editor or a tool can show the user
+    // why a filter was dropped without reading the APO's log file.
+    std::vector<std::string> messages;
+
+    // True when at least one message reports a dropped filter.
+    bool hasDroppedFilter() const;
+};
+
+// Load a configuration into a throwaway chain and report what happened. Used to
+// warn about a problem before the user relies on the file; it publishes nothing
+// and has no side effects on any running engine.
+ConfigCheck checkConfigurationFile(const std::string& path, const DeviceContext& context);
+
+// The same check for configuration text that has not been written to disk yet,
+// so an editor can validate what it is about to save.
+ConfigCheck checkConfigurationText(const std::string& text, const std::string& basePath,
+                                   const DeviceContext& context);
+
 class ConfigLoader {
 public:
     ConfigLoader(DeviceContext context, LogSink log);
+
+    // Ceiling on the heap the impulse convolvers in this configuration may hold,
+    // in bytes. A Convolution whose impulse does not fit is refused, and the
+    // refusal names the file. Defaults to kImpulseMemoryBudgetBytes. Raise it to
+    // allow a deliberately long impulse; it is a budget, not a tap limit, so a
+    // mono device and a four-channel one are held to the same memory.
+    void setImpulseMemoryBudget(size_t bytes) { impulseBudgetBytes_ = bytes; }
+    size_t impulseMemoryBudget() const { return impulseBudgetBytes_; }
 
     // Load a configuration file. Relative Include paths resolve against the
     // including file's directory.
@@ -92,6 +122,7 @@ private:
 
     DeviceContext ctx_;
     LogSink log_;
+    size_t impulseBudgetBytes_ = kImpulseMemoryBudgetBytes;
 
     std::vector<std::string> allChannels_;
     std::vector<size_t> currentChannels_;
