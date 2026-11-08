@@ -253,7 +253,8 @@ STDMETHODIMP ApoLiteApo::IsOutputFormatSupported(struct IAudioMediaType* pOpposi
 STDMETHODIMP ApoLiteApo::GetInputChannelCount(UINT32* pu32ChannelCount) {
     if (pu32ChannelCount == nullptr) return E_POINTER;
     std::lock_guard<std::mutex> lock(stateMutex_);
-    *pu32ChannelCount = inputChannels_ != 0 ? inputChannels_ : 2;
+    const UINT32 inCh = inputChannels_.load(std::memory_order_relaxed);
+    *pu32ChannelCount = inCh != 0 ? inCh : 2;
     return S_OK;
 }
 
@@ -280,24 +281,34 @@ STDMETHODIMP ApoLiteApo::LockForProcess(UINT32 u32NumInputConnections,
     if (locked_) return apo::kApoErrAlreadyInitialized;
 
     if (inFormat->Format.wFormatTag == WAVE_FORMAT_EXTENSIBLE) {
-        inputChannels_ = inFormat->Format.nChannels;
-        isFloatFormat_ = guidEquals(inFormat->SubFormat, kSubtypeIeeeFloat);
+        inputChannels_.store(inFormat->Format.nChannels, std::memory_order_relaxed);
+        isFloatFormat_.store(guidEquals(inFormat->SubFormat, kSubtypeIeeeFloat),
+                             std::memory_order_relaxed);
         channelMask_ = inFormat->dwChannelMask;
     } else {
-        inputChannels_ = inFormat->Format.nChannels;
-        isFloatFormat_ = inFormat->Format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT;
+        inputChannels_.store(inFormat->Format.nChannels, std::memory_order_relaxed);
+        isFloatFormat_.store(inFormat->Format.wFormatTag == WAVE_FORMAT_IEEE_FLOAT,
+                             std::memory_order_relaxed);
         channelMask_ = 0;
     }
 
-    outputChannels_ = outFormat->Format.nChannels;
+    outputChannels_.store(outFormat->Format.nChannels, std::memory_order_relaxed);
     sampleRate_ = static_cast<double>(inFormat->Format.nSamplesPerSec);
-    maxFrames_ = std::max(in->u32MaxFrameCount, out->u32MaxFrameCount);
-    if (maxFrames_ == 0) maxFrames_ = 1024;
+    maxFrames_.store(std::max(in->u32MaxFrameCount, out->u32MaxFrameCount),
+                     std::memory_order_relaxed);
+    if (maxFrames_.load() == 0) maxFrames_.store(1024);
 
-    engine_.configure(sampleRate_, inputChannels_, outputChannels_, channelMask_, isCapture_,
-                      isPreMix_, /*postMixInstalled=*/true, toNarrow(deviceName_.c_str()),
+    // The engine clamps a host block to its prepared size, so this only has to
+    // cover the frame counts the host promised. Sizing it here keeps the audio
+    // thread allocation-free.
+    const size_t channels =
+        std::max<UINT32>(inputChannels_.load(), outputChannels_.load());
+    scratch_.assign(static_cast<size_t>(maxFrames_.load()) * std::max<size_t>(channels, 1), 0.0f);
+
+    engine_.configure(sampleRate_, inputChannels_.load(), outputChannels_.load(), channelMask_,
+                      isCapture_, isPreMix_, /*postMixInstalled=*/true, toNarrow(deviceName_.c_str()),
                       toNarrow(connectionName_.c_str()), toNarrow(deviceGuid_.c_str()));
-    engine_.setMaxFrames(maxFrames_);
+    engine_.setMaxFrames(maxFrames_.load());
     loadConfiguration();
 
     locked_ = true;
@@ -325,41 +336,62 @@ ApoLiteApo::APOProcess(UINT32 u32NumInputConnections, APO_CONNECTION_PROPERTY** 
     if (in == nullptr || out == nullptr) return;
 
     const UINT32 frames = in->u32ValidFrameCount;
-    if (frames == 0 || out->u32ValidFrameCount < frames) return;
+    if (frames == 0) {
+        out->u32BufferFlags = apo::APO_BUFFER_SILENT;
+        return;
+    }
+    // A host that asks for more frames than it promised is a host error; leaving
+    // the output untouched is the only safe response, but say so in the flags.
+    if (out->u32ValidFrameCount < frames) {
+        out->u32BufferFlags = apo::APO_BUFFER_SILENT;
+        return;
+    }
 
     auto* src = reinterpret_cast<const float*>(in->pBuffer);
     auto* dst = reinterpret_cast<float*>(out->pBuffer);
     if (src == nullptr || dst == nullptr) return;
 
-    const size_t channels = outputChannels_ != 0 ? outputChannels_ : inputChannels_;
+    const bool isFloat = isFloatFormat_.load(std::memory_order_relaxed);
+    const UINT32 inCh = inputChannels_.load(std::memory_order_relaxed);
+    const UINT32 outCh = outputChannels_.load(std::memory_order_relaxed);
+    const size_t channels = outCh != 0 ? outCh : inCh;
+    if (channels == 0) return;
 
     // Fast path: float, in place, no channel conversion.
-    if (isFloatFormat_ && src == dst && channels != 0) {
+    if (isFloat && src == dst) {
         engine_.processInterleaved(dst, frames);
         out->u32BufferFlags = apo::APO_BUFFER_VALID;
         return;
     }
 
-    // Integer PCM or separate buffers: convert into a scratch float buffer.
-    if (scratch_.size() < static_cast<size_t>(frames) * channels)
-        scratch_.resize(static_cast<size_t>(frames) * channels);
+    // Integer PCM or separate buffers. scratch_ was sized in LockForProcess, so
+    // this must not allocate: a block larger than that is handled in chunks.
+    const size_t capacityFrames = scratch_.size() / channels;
+    if (capacityFrames == 0) return;
 
-    if (isFloatFormat_) {
-        std::memcpy(scratch_.data(), src, static_cast<size_t>(frames) * channels * sizeof(float));
-    } else {
-        const auto* intSrc = reinterpret_cast<const int32_t*>(src);
-        for (size_t i = 0; i < static_cast<size_t>(frames) * channels; ++i)
-            scratch_[i] = int32ToFloat(intSrc[i]);
-    }
+    size_t done = 0;
+    while (done < frames) {
+        const size_t n = std::min(capacityFrames, static_cast<size_t>(frames) - done);
+        const size_t samples = n * channels;
+        const float* srcChunk = src + done * channels;
+        float* dstChunk = dst + done * channels;
 
-    engine_.processInterleaved(scratch_.data(), frames);
+        if (isFloat) {
+            std::memcpy(scratch_.data(), srcChunk, samples * sizeof(float));
+        } else {
+            const auto* intSrc = reinterpret_cast<const int32_t*>(srcChunk);
+            for (size_t i = 0; i < samples; ++i) scratch_[i] = int32ToFloat(intSrc[i]);
+        }
 
-    if (isFloatFormat_) {
-        std::memcpy(dst, scratch_.data(), static_cast<size_t>(frames) * channels * sizeof(float));
-    } else {
-        auto* intDst = reinterpret_cast<int32_t*>(dst);
-        for (size_t i = 0; i < static_cast<size_t>(frames) * channels; ++i)
-            intDst[i] = floatToInt32(scratch_[i]);
+        engine_.processInterleaved(scratch_.data(), n);
+
+        if (isFloat) {
+            std::memcpy(dstChunk, scratch_.data(), samples * sizeof(float));
+        } else {
+            auto* intDst = reinterpret_cast<int32_t*>(dstChunk);
+            for (size_t i = 0; i < samples; ++i) intDst[i] = floatToInt32(scratch_[i]);
+        }
+        done += n;
     }
     out->u32BufferFlags = apo::APO_BUFFER_VALID;
 }
@@ -444,7 +476,12 @@ void ApoLiteApo::startWatcher() {
 }
 
 void ApoLiteApo::stopWatcher() {
-    if (!watcherRunning_.load()) return;
+    // The watcher clears watcherRunning_ itself when it exits, so it must not
+    // gate the join: a self-exited thread is still joinable, and letting
+    // std::thread's destructor run on a joinable thread calls std::terminate,
+    // which takes the host audio process down.
+    if (!watcher_.joinable()) return;
+
     watcherStop_ = true;
     // Wake ReadDirectoryChangesW by touching the directory.
     const std::wstring path = configPath();
@@ -456,7 +493,7 @@ void ApoLiteApo::stopWatcher() {
         CancelSynchronousIo(watcher_.native_handle());
         CloseHandle(dir);
     }
-    if (watcher_.joinable()) watcher_.join();
+    watcher_.join();
     watcherRunning_ = false;
 }
 

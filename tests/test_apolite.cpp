@@ -1,10 +1,12 @@
 // ApoLite - test suite. Uses only the C++ standard library.
 // Copyright (c) 2026 Joel Mandell. MIT licensed.
+#include <atomic>
 #include <cmath>
 #include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(_WIN32)
@@ -127,6 +129,38 @@ void testBiquad() {
     double y = 0.0;
     for (int i = 0; i < 20000; ++i) y = bq.process(1.0);
     checkNear(y, std::pow(10.0, 6.0 / 20.0), 1e-3, "biquad DC gain from time domain");
+
+    // A slope above the shelf maximum makes the cookbook radicand negative. That
+    // used to yield NaN coefficients, which put NaN into the filter state and
+    // silenced the channel permanently. Every design must be finite.
+    const apolite::FilterType types[] = {apolite::FilterType::LowShelf,
+                                         apolite::FilterType::HighShelf,
+                                         apolite::FilterType::Peaking};
+    const double slopes[] = {0.25, 0.5, 0.9, 1.0, 2.0, 3.0, 10.0};
+    const double gains[] = {-24.0, -6.0, 0.0, 6.0, 24.0};
+    bool allFinite = true;
+    for (apolite::FilterType t : types) {
+        for (double s : slopes) {
+            for (double g : gains) {
+                apolite::Biquad b =
+                    apolite::Biquad::design(t, g, 500.0, sr, s, apolite::ParamKind::ShelfSlope, true);
+                const apolite::BiquadCoeffs c = b.coeffs();
+                if (!std::isfinite(c.b0) || !std::isfinite(c.b1) || !std::isfinite(c.b2) ||
+                    !std::isfinite(c.a1) || !std::isfinite(c.a2))
+                    allFinite = false;
+                // A NaN would also make the filter output non-finite.
+                if (!std::isfinite(b.process(1.0))) allFinite = false;
+            }
+        }
+    }
+    check(allFinite, "extreme shelf slopes produce finite coefficients and output");
+
+    // The specific case that used to fail.
+    const apolite::Biquad bad =
+        apolite::Biquad::design(apolite::FilterType::LowShelf, 20.0, 200.0, sr, 3.0,
+                                apolite::ParamKind::ShelfSlope, true);
+    check(std::isfinite(bad.coeffs().b0) && std::isfinite(bad.coeffs().a1),
+          "slope beyond the shelf maximum stays finite");
 }
 
 // ---------------------------------------------------------------- FIR tests
@@ -749,6 +783,62 @@ void testRegistryLayout() {
           "protected audio value name");
 }
 
+// Reloading the configuration while audio is being processed must be safe.
+// Before this was fixed, loadConfiguration reassigned buffers the audio thread
+// was using and freed the chain the audio thread had just loaded, so a reload
+// during playback could corrupt the heap or read freed memory. This runs both
+// sides concurrently; with a sanitizer build it also catches the race.
+void testEngineReloadWhileProcessing() {
+    const std::string cfgA = writeTemp("reload_a.txt", "Preamp: -6 dB\nFilter: ON PK Fc 1000 Hz Gain 3 dB Q 1\n");
+    const std::string cfgB = writeTemp(
+        "reload_b.txt",
+        "Preamp: -3 dB\nFilter: ON HP Fc 80 Hz\nFilter: ON LSC 4 dB Fc 200 Hz Gain 4 dB\n");
+    const std::string cfgC = writeTemp("reload_c.txt", "GraphicEQ: 100 -3; 1000 2; 5000 -1\n");
+
+    apolite::Engine engine;
+    engine.configure(48000.0, 2, 2, 0, false, false, true, "Speakers", "Speakers", "");
+    engine.loadConfiguration(cfgA);
+
+    const std::string paths[] = {cfgA, cfgB, cfgC};
+    std::atomic<bool> stop{false};
+    std::atomic<long> blocks{0};
+
+    std::thread audio([&]() {
+        std::vector<float> buf(480 * 2);
+        while (!stop.load(std::memory_order_relaxed)) {
+            for (float& s : buf) s = 0.25f;
+            engine.processInterleaved(buf.data(), 480);
+            blocks.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    for (int i = 0; i < 400; ++i) engine.loadConfiguration(paths[i % 3]);
+
+    stop.store(true, std::memory_order_relaxed);
+    audio.join();
+
+    // The point is that we got here without a crash or sanitizer report, and
+    // that the audio thread really did run throughout.
+    check(blocks.load() > 0, "audio thread processed during reloads");
+    check(engine.loadConfiguration(cfgA) == 2, "engine usable after concurrent reloads");
+}
+
+void testEngineLargeHostBlock() {
+    // A host block larger than the prepared chain must be chunked, not resized
+    // from the audio thread.
+    const std::string cfg = writeTemp("large_block.txt", "Preamp: -6 dB\n");
+    apolite::Engine engine;
+    engine.setMaxFrames(256);
+    engine.configure(48000.0, 2, 2, 0, false, false, true, "Speakers", "Speakers", "");
+    engine.loadConfiguration(cfg);
+
+    std::vector<float> buf(4096 * 2, 0.5f);
+    engine.processInterleaved(buf.data(), 4096);
+    const double expected = 0.5 * std::pow(10.0, -6.0 / 20.0);
+    checkNear(buf[0], expected, 1e-4, "large block first sample");
+    checkNear(buf[4096 * 2 - 1], expected, 1e-4, "large block last sample");
+}
+
 void testEngineStage() {
     // A capture-only config must be skipped entirely on a playback stage.
     const std::string cfg =
@@ -796,6 +886,8 @@ int main() {
     testEngineDevice();
     testEngineIir();
     testEngineCompressor();
+    testEngineReloadWhileProcessing();
+    testEngineLargeHostBlock();
     testEngineStage();
     testSettingsRoundTrip();
     testSettingsParsePreset();
