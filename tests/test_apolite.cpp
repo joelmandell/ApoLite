@@ -271,10 +271,11 @@ void testFirImpulseCap() {
 
     // The reported memory must grow with the tap count, and must be bounded at
     // the cap: the shared kernel is about eight times the impulse length.
-    const size_t small = apolite::firMemoryBytes(16384, 1, block);
-    const size_t large = apolite::firMemoryBytes(apolite::kMaxImpulseTaps, 1, block);
-    check(large > small, "reported memory grows with tap count");
-    check(large < 16u * 1024u * 1024u, "memory at the cap stays under 16 MB per channel");
+    // Not named `small`/`large`: the Windows headers define `small` as a macro.
+    const size_t smallBytes = apolite::firMemoryBytes(16384, 1, block);
+    const size_t largeBytes = apolite::firMemoryBytes(apolite::kMaxImpulseTaps, 1, block);
+    check(largeBytes > smallBytes, "reported memory grows with tap count");
+    check(largeBytes < 16u * 1024u * 1024u, "memory at the cap stays under 16 MB per channel");
 }
 
 // Channels that convolve with the same impulse must share one kernel, so the
