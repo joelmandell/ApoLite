@@ -10,6 +10,11 @@ namespace apolite {
 
 namespace {
 constexpr size_t kConvolverBlock = 256;
+
+// -log2(10) / 20: turns a decibel gain into an exp2 exponent, since
+// 10^(-x/20) == 2^(x * kNegLog2TenOver20). exp2 is a single instruction where
+// pow is a library call.
+constexpr float kNegLog2TenOver20 = -0.16609640474f;
 }
 
 void PreampFilter::prepare(double sampleRate, size_t maxFrames, size_t channels) {
@@ -304,7 +309,9 @@ void CompressorFilter::process(const Sample* const* in, Sample* const* out, size
                 reductionDb = slope_ * (t * t) / (2.0f * static_cast<float>(kneeDb_));
             }
 
-            float gain = std::pow(10.0f, -reductionDb / 20.0f) * makeup_;
+            // exp2(x * -log2(10)/20) is the same as pow(10, -x/20), but a single
+            // instruction instead of a library call.
+            float gain = std::exp2(reductionDb * kNegLog2TenOver20) * makeup_;
 
             // Safety limiter keeps the output below the requested ceiling.
             const float peak = std::fabs(x) * gain;
